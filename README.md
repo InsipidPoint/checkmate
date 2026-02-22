@@ -30,18 +30,36 @@ scripts/run.py  (deterministic Python while loop — the real orchestrator)
   │
   ├─ Intake loop [up to --max-intake-iter, default 5]:
   │    ├─ Draft criteria  (intake prompt + task + refinement feedback)
-  │    ├─ Criteria-judge: are the criteria good enough?
-  │    │    ├─ APPROVED → lock criteria.md, proceed to main loop
-  │    │    └─ NEEDS_WORK → extract fixes, refine, next intake iteration
-  │    └─ [NEEDS_CLARIFICATION] → pause, ask user, resume on response
+  │    ├─ ⏸ USER REVIEW (interactive): show draft → wait for approval/feedback
+  │    │     approved? → lock criteria.md
+  │    │     feedback? → refine, next intake iteration
+  │    └─ (batch mode --no-interactive: criteria-judge gates instead of user)
+  │
+  ├─ ⏸ PRE-START GATE (interactive): show final task + criteria → user confirms "go"
+  │         (edit task / cancel supported here)
   │
   └─ Main loop [up to --max-iter, default 10]:
        ├─ Worker: spawn agent session → writes iter-N/output.md
        │          (full runtime: exec, web_search, all skills, OAuth auth)
        ├─ Judge:  spawn agent session → writes iter-N/verdict.md
-       ├─ PASS?  → write final-output.md, notify user via --session-key
-       └─ FAIL?  → extract gap summary, append to feedback.md, next iteration
+       ├─ PASS?  → write final-output.md, notify user via --session-key, exit
+       └─ FAIL?  → extract gap summary → ⏸ CHECKPOINT (interactive): show score + gaps
+                     continue?    → next iteration (with judge gaps)
+                     redirect: X  → next iteration (with user direction appended)
+                     stop?        → end loop, take best result so far
 ```
+
+**Interactive mode** (default): user approves criteria, confirms pre-start, and reviews each FAIL checkpoint.
+**Batch mode** (`--no-interactive`): fully autonomous; criteria-judge gates intake, no checkpoints.
+
+### User input bridge
+
+When the orchestrator needs user input, it:
+1. Writes `workspace/pending-input.json` (kind + workspace path + channel)
+2. Sends a notification via `--session-key` and `--channel`
+3. Polls `workspace/user-input.md` every 30 seconds (up to `--checkpoint-timeout` minutes)
+
+The main agent acts as the bridge: when `pending-input.json` exists and the user replies, the agent writes their response to `user-input.md`. The orchestrator picks it up automatically and resumes.
 
 Each LLM call is an isolated OpenClaw agent session:
 
@@ -59,9 +77,11 @@ Result is read from `result.payloads[0].text`. Sessions are stateless — no sha
 | File | Role | Called by |
 |------|------|-----------|
 | `prompts/intake.md` | Converts task → criteria draft | `run_intake_draft()` |
-| `prompts/criteria-judge.md` | Evaluates criteria quality (APPROVED / NEEDS_WORK) | `run_criteria_judge()` |
+| `prompts/criteria-judge.md` | Evaluates criteria quality (APPROVED / NEEDS_WORK) — batch mode only | `run_criteria_judge()` |
 | `prompts/worker.md` | Performs the actual task | `run_worker()` |
 | `prompts/judge.md` | Evaluates output against criteria (PASS / FAIL) | `run_judge()` |
+
+`prompts/orchestrator.md` is architecture reference documentation only — **not called by `run.py`**.
 
 ---
 
@@ -191,6 +211,8 @@ When the user says `checkmate: <task>` or `until it passes`, the main agent:
 | `--judge-timeout` | `300` | Seconds per judge agent call |
 | `--session-key` | `""` | Main session key; used to deliver result notification |
 | `--channel` | `telegram` | Delivery channel for result (`telegram`, `whatsapp`, etc.) |
+| `--no-interactive` | off | Disable user checkpoints; fully autonomous batch mode |
+| `--checkpoint-timeout` | `60` | Minutes to wait for user reply at each interactive checkpoint |
 
 ---
 
@@ -242,15 +264,24 @@ The script reads `state.json` to find where it left off:
 
 This means you can safely re-run after a network blip, rate-limit crash, or system restart.
 
-### Clarification pause
+### Interactive checkpoints
 
-During intake, if the task is too vague for testable criteria, the worker sends a `[NEEDS_CLARIFICATION]` message to your session and polls for `workspace/clarification-response.md` for up to 30 minutes.
+In interactive mode (default), the orchestrator pauses at three gates: criteria review, pre-start confirmation, and each FAIL iteration. When paused, it writes `workspace/pending-input.json` and sends you a notification via `--channel`.
 
-To respond:
+The main agent acts as a bridge: when you reply to the notification, it writes your response to `workspace/user-input.md`. The orchestrator detects the file within 30 seconds and resumes.
+
+**Accepted replies at each gate:**
+
+| Gate | Approve / continue | Redirect | Cancel |
+|------|--------------------|----------|--------|
+| Criteria review | `ok`, `approve`, `lgtm` | any feedback text | — |
+| Pre-start | `go`, `start`, `ok` | `edit task: NEW TASK` | `cancel` |
+| Iteration checkpoint | `continue`, (empty) | `redirect: DIRECTION` | `stop` |
+
+To inject a response manually (e.g., after a notification was missed):
+
 ```bash
-cat > /root/clawd/memory/checkmate-TIMESTAMP/clarification-response.md << 'EOF'
-Your answers to the questions here
-EOF
+echo "continue" > /root/clawd/memory/checkmate-TIMESTAMP/user-input.md
 ```
 
-The script resumes automatically when it detects the file.
+The orchestrator polls every 30 seconds and resumes automatically.
