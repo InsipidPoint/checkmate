@@ -1,0 +1,5 @@
+# Runtime artifacts — never commit these
+criteria.md
+workspace/
+*.pyc
+__pycache__/
