@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""
+checkmate/scripts/run.py
+
+Deterministic Python orchestrator for the checkmate skill.
+Real while loop. LLM called as a subprocess via `openclaw agent`.
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+SKILL_DIR = Path(__file__).parent.parent
+
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+
+def log(msg: str):
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"[checkmate {ts}] {msg}", flush=True)
+
+
+def read_file(path: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def write_file(path: Path, content: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def load_state(workspace: Path) -> dict:
+    p = workspace / "state.json"
+    return json.loads(p.read_text()) if p.exists() else {"iteration": 0, "status": "running"}
+
+
+def save_state(workspace: Path, state: dict):
+    write_file(workspace / "state.json", json.dumps(state, indent=2))
+
+
+# ── LLM interface ─────────────────────────────────────────────────────────────
+
+def call_llm(prompt: str, session_id: str) -> str:
+    """Single-turn LLM call via openclaw agent CLI. Returns reply text."""
+    cmd = [
+        "openclaw", "agent",
+        "--session-id", session_id,
+        "--message", prompt,
+        "--json",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            raise RuntimeError(f"openclaw agent exited {result.returncode}: {result.stderr[:200]}")
+        data = json.loads(result.stdout)
+        return data["result"]["payloads"][0]["text"]
+    except (KeyError, IndexError) as e:
+        raise RuntimeError(f"Unexpected response shape: {result.stdout[:200]}") from e
+
+
+def notify(session_key: str, message: str, channel: str):
+    """Deliver checkmate result back to the user via the main session."""
+    if not session_key:
+        log("No session key — result written to workspace/final-output.md")
+        return
+    cmd = [
+        "openclaw", "agent",
+        "--session-id", session_key,
+        "--message", message,
+        "--deliver",
+        "--channel", channel,
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        log(f"Delivered result to session {session_key}")
+    except Exception as e:
+        log(f"Notification failed ({e}) — result in workspace/final-output.md")
+
+
+# ── Stages ────────────────────────────────────────────────────────────────────
+
+def run_intake(workspace: Path, task: str) -> str:
+    criteria_path = workspace / "criteria.md"
+    if criteria_path.exists():
+        log("intake: criteria.md already exists, skipping")
+        return criteria_path.read_text()
+
+    template = read_file(SKILL_DIR / "prompts" / "intake.md")
+    prompt = f"{template}\n\n---\n\n## Task\n\n{task}"
+
+    log("intake: generating criteria...")
+    reply = call_llm(prompt, f"checkmate-intake-{int(time.time())}")
+    write_file(criteria_path, reply)
+    log(f"intake: wrote criteria.md ({len(reply)} chars)")
+    return reply
+
+
+def run_worker(workspace: Path, task: str, criteria: str, feedback: str,
+               iteration: int, max_iter: int) -> str:
+    iter_dir = workspace / f"iter-{iteration:02d}"
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    output_path = iter_dir / "output.md"
+
+    if output_path.exists():
+        log(f"iter {iteration}: output.md already exists, skipping worker (resume)")
+        return output_path.read_text()
+
+    template = read_file(SKILL_DIR / "prompts" / "worker.md")
+    prompt = (
+        template
+        .replace("{{TASK}}", task)
+        .replace("{{CRITERIA}}", criteria)
+        .replace("{{FEEDBACK}}", feedback.strip() or "(none — this is the first attempt)")
+        .replace("{{ITERATION}}", str(iteration))
+        .replace("{{MAX_ITER}}", str(max_iter))
+        .replace("{{OUTPUT_PATH}}", str(output_path))
+    )
+
+    log(f"iter {iteration}/{max_iter}: calling worker...")
+    reply = call_llm(prompt, f"checkmate-worker-{iteration}-{int(time.time())}")
+    write_file(output_path, reply)
+    log(f"iter {iteration}: worker done ({len(reply)} chars)")
+    return reply
+
+
+def run_judge(workspace: Path, criteria: str, output: str,
+              iteration: int, max_iter: int) -> tuple[str, bool]:
+    iter_dir = workspace / f"iter-{iteration:02d}"
+    verdict_path = iter_dir / "verdict.md"
+
+    template = read_file(SKILL_DIR / "prompts" / "judge.md")
+    prompt = (
+        f"{template}\n\n---\n\n"
+        f"## Criteria\n\n{criteria}\n\n"
+        f"## Worker Output\n\n{output}\n\n"
+        f"## Context\n\nThis is iteration {iteration} of {max_iter}."
+    )
+
+    log(f"iter {iteration}: running judge...")
+    reply = call_llm(prompt, f"checkmate-judge-{iteration}-{int(time.time())}")
+    write_file(verdict_path, reply)
+
+    is_pass = bool(re.search(r"\*\*Result:\*\*\s*PASS", reply, re.IGNORECASE))
+    score_m = re.search(r"\*\*Score:\*\*\s*(\d+)/(\d+)", reply)
+    score = f"{score_m.group(1)}/{score_m.group(2)}" if score_m else "?/?"
+    log(f"iter {iteration}: judge → {'PASS ✅' if is_pass else f'FAIL ❌ ({score} criteria passing)'}")
+    return reply, is_pass
+
+
+def extract_gaps(verdict: str) -> str:
+    m = re.search(r"## Gap Summary\n(.*?)(?=\n## |\Z)", verdict, re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+
+def find_best_iteration(workspace: Path) -> tuple[int, str]:
+    best_iter, best_score, best_output = 1, -1, ""
+    for iter_dir in sorted(workspace.glob("iter-*")):
+        m = re.search(r"\*\*Score:\*\*\s*(\d+)/\d+",
+                      read_file(iter_dir / "verdict.md"))
+        if m and int(m.group(1)) > best_score:
+            best_score = int(m.group(1))
+            best_iter = int(iter_dir.name.split("-")[1])
+            best_output = read_file(iter_dir / "output.md")
+    return best_iter, best_output
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Checkmate — deterministic LLM iteration loop")
+    parser.add_argument("--workspace", required=True, help="Workspace directory path")
+    parser.add_argument("--task",        default="",       help="Task text (or read from workspace/task.md)")
+    parser.add_argument("--max-iter",    type=int, default=20)
+    parser.add_argument("--session-key", default="",       help="Main session key for result delivery")
+    parser.add_argument("--channel",     default="telegram")
+    args = parser.parse_args()
+
+    workspace = Path(args.workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    task = args.task or read_file(workspace / "task.md")
+    if not task:
+        print("Error: --task is required (or write task to workspace/task.md)", file=sys.stderr)
+        sys.exit(1)
+    write_file(workspace / "task.md", task)
+
+    state = load_state(workspace)
+    if state.get("status") in ("pass", "fail"):
+        log(f"workspace already completed with status={state['status']} — exiting")
+        return
+
+    start_iter = state.get("iteration", 0) + 1
+    max_iter   = args.max_iter
+
+    log(f"starting — iterations {start_iter}–{max_iter}, workspace={workspace}")
+
+    # ── Intake ────────────────────────────────────────────────────────────────
+    criteria = run_intake(workspace, task)
+
+    # ── Loop ──────────────────────────────────────────────────────────────────
+    feedback = read_file(workspace / "feedback.md")
+
+    for iteration in range(start_iter, max_iter + 1):
+        log(f"────── Iteration {iteration}/{max_iter} ──────")
+        save_state(workspace, {"iteration": iteration, "status": "running"})
+
+        # Worker
+        output = run_worker(workspace, task, criteria, feedback, iteration, max_iter)
+
+        if "[BLOCKED]" in output:
+            log(f"worker BLOCKED — skipping judge this iteration")
+            gaps = f"Worker was blocked:\n{output}"
+        else:
+            # Judge
+            verdict, is_pass = run_judge(workspace, criteria, output, iteration, max_iter)
+
+            if is_pass:
+                write_file(workspace / "final-output.md", output)
+                save_state(workspace, {"iteration": iteration, "status": "pass"})
+                log(f"✅ PASSED on iteration {iteration}/{max_iter}")
+                notify(
+                    args.session_key,
+                    f"✅ checkmate: PASSED on iteration {iteration}/{max_iter}\n\n{output}",
+                    args.channel,
+                )
+                return
+
+            gaps = extract_gaps(verdict)
+
+        # Accumulate feedback for next worker
+        if gaps:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            entry = f"\n## Iteration {iteration} gaps ({ts})\n{gaps}\n"
+            with open(workspace / "feedback.md", "a") as f:
+                f.write(entry)
+            feedback += entry
+
+    # ── Max iterations reached ────────────────────────────────────────────────
+    best_iter, best_output = find_best_iteration(workspace)
+    write_file(workspace / "final-output.md", best_output)
+    save_state(workspace, {"iteration": max_iter, "status": "fail"})
+
+    best_verdict = read_file(workspace / f"iter-{best_iter:02d}" / "verdict.md")
+    log(f"⚠️ max iterations reached — best attempt was iter {best_iter}")
+    notify(
+        args.session_key,
+        (
+            f"⚠️ checkmate: max iterations ({max_iter}) reached without full PASS\n\n"
+            f"Best attempt: iteration {best_iter}\n\n{best_output}\n\n"
+            f"---\nFinal judge report:\n{best_verdict}"
+        ),
+        args.channel,
+    )
+
+
+if __name__ == "__main__":
+    main()
