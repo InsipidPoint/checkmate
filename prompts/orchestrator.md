@@ -1,5 +1,8 @@
 # Orchestrator Architecture Reference
 
+> **Reference only — this file is NOT an active prompt and is NOT called by `run.py`.**
+> It documents the design rationale for contributors and developers.
+
 The checkmate orchestrator is `scripts/run.py` — a deterministic Python script, not an LLM.
 
 ## Why a script, not an LLM

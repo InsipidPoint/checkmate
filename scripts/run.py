@@ -175,6 +175,7 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
 
     feedback = ""
     criteria = ""
+    _criteria_approved = False
 
     for i in range(1, max_intake_iter + 1):
         # Re-read task each iteration (may have been updated with clarification)
@@ -202,10 +203,26 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
 
         if approved:
             log(f"intake: criteria APPROVED on iteration {i}")
+            _criteria_approved = True
             break
 
         feedback = extract_criteria_feedback(verdict)
         log(f"intake: criteria NEEDS_WORK — refining (iter {i})")
+
+    if not _criteria_approved:
+        log(
+            f"WARNING: intake: reached max iterations ({max_intake_iter}) without APPROVED verdict — "
+            f"proceeding with best-effort criteria (criteria quality may be suboptimal)"
+        )
+        notify(
+            session_key,
+            (
+                f"⚠️ checkmate: criteria intake could not reach APPROVED after {max_intake_iter} iterations.\n"
+                f"Proceeding with best-effort criteria — results may be less reliable.\n"
+                f"Workspace: {workspace}"
+            ),
+            channel,
+        )
 
     write_file(criteria_path, criteria)
     log(f"intake: locked criteria.md ({len(criteria)} chars)")
@@ -258,6 +275,9 @@ def run_judge(workspace: Path, criteria: str, output: str,
     write_file(verdict_path, reply)
 
     is_pass = bool(re.search(r"\*\*Result:\*\*\s*PASS", reply, re.IGNORECASE))
+    is_fail = bool(re.search(r"\*\*Result:\*\*\s*FAIL", reply, re.IGNORECASE))
+    if not is_pass and not is_fail:
+        log(f"WARNING: iter {iteration}: malformed judge output — neither PASS nor FAIL detected; treating as FAIL")
     score_m = re.search(r"\*\*Score:\*\*\s*(\d+)/(\d+)", reply)
     score = f"{score_m.group(1)}/{score_m.group(2)}" if score_m else "?/?"
     log(f"iter {iteration}: judge → {'PASS ✅' if is_pass else f'FAIL ❌ ({score} criteria passing)'}")
@@ -327,8 +347,17 @@ def main():
         save_state(workspace, {"iteration": iteration, "status": "running"})
 
         # Worker
-        output = run_worker(workspace, task, criteria, feedback, iteration, max_iter,
-                            worker_timeout=args.worker_timeout)
+        try:
+            output = run_worker(workspace, task, criteria, feedback, iteration, max_iter,
+                                worker_timeout=args.worker_timeout)
+        except RuntimeError as exc:
+            log(f"WARNING: iter {iteration}: worker call failed ({exc}) — skipping to next iteration")
+            gaps = f"Worker failed with error: {exc}"
+            entry = f"\n## Iteration {iteration} worker error\n{gaps}\n"
+            with open(workspace / "feedback.md", "a") as f:
+                f.write(entry)
+            feedback += entry
+            continue
 
         if "[BLOCKED]" in output:
             log(f"worker BLOCKED — skipping judge this iteration")

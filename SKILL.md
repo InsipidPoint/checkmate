@@ -104,7 +104,13 @@ If the script is interrupted, just re-run it with the same `--workspace`. It rea
 
 ## Prompts
 
+Active prompts called by `run.py`:
+
 - `prompts/intake.md` — converts task → criteria draft
 - `prompts/criteria-judge.md` — evaluates criteria quality (APPROVED / NEEDS_WORK)
 - `prompts/worker.md` — worker prompt (variables: TASK, CRITERIA, FEEDBACK, ITERATION, MAX_ITER, OUTPUT_PATH)
 - `prompts/judge.md` — evaluates output against criteria (PASS / FAIL)
+
+Reference only (not called by `run.py`):
+
+- `prompts/orchestrator.md` — architecture documentation explaining the design rationale
