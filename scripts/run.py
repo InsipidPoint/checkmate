@@ -83,7 +83,7 @@ def call_agent(prompt: str, session_id: str, timeout_s: int = 3600,
 
 
 def notify(session_key: str, message: str, channel: str):
-    """Deliver a message to the user via the main session."""
+    """Deliver a plain message to the user (no routing; for final results/errors)."""
     if not session_key:
         log("No session key — result written to workspace/final-output.md")
         return
@@ -113,49 +113,85 @@ def request_user_input(
     default_response: str = "",   # returned on timeout (empty = proceed as-is)
 ) -> str:
     """
-    Pause the run, send `message` to the user, wait up to `timeout_min` minutes for a reply.
+    Pause the run, send a checkpoint to J's session as a proper agent turn, then poll
+    for the user's response.
 
-    Bridge mechanism:
-      - Writes `workspace/pending-input.json` so J (main session heartbeat) knows to relay
-      - J writes the user's reply to `workspace/user-input.md`
-      - We poll that file every 30s; when it appears we read+delete it and return the response
+    Routing mechanism (no standing config required):
+      - Sends a proper agent message (not --deliver) to J's session containing:
+          (a) the user-facing checkpoint content
+          (b) explicit routing instruction: write reply to workspace/user-input.md
+      - J processes the message, presents it to the user, and has the routing
+        instruction fresh in context when the user replies
+      - J writes the user's reply to user-input.md
+      - We poll that file every 5s
 
-    If the file never appears within timeout, returns `default_response`.
+    Falls back to --deliver if the agent call fails (heartbeat bridge as safety net).
     """
-    input_marker  = workspace / "pending-input.json"
-    response_file = workspace / "user-input.md"
+    response_file  = workspace / "user-input.md"
+    pending_marker = workspace / "pending-input.json"
 
     # Remove any stale response from a prior checkpoint
     if response_file.exists():
         response_file.unlink()
 
-    # Write marker so heartbeat knows we're waiting
+    # Write marker (enables heartbeat fallback if primary bridge fails)
     marker = {
         "kind": kind,
         "waiting_since": datetime.now(timezone.utc).isoformat(),
         "timeout_min": timeout_min,
         "workspace": str(workspace),
-        "channel": channel,
-        "session_key": session_key,
     }
-    write_file(input_marker, json.dumps(marker, indent=2))
+    write_file(pending_marker, json.dumps(marker, indent=2))
 
-    # Notify user
-    notify(session_key, message, channel)
-    log(f"⏸  paused ({kind}) — waiting for user reply (up to {timeout_min} min)...")
+    # Build the message to J — user-facing content + self-contained routing instruction
+    agent_msg = (
+        f"[checkmate {kind}]\n\n"
+        f"{message}\n\n"
+        f"---\n"
+        f"⚙️ **Routing instruction (act on this):** When the user replies to you, "
+        f"immediately write their exact reply to:\n"
+        f"`{workspace}/user-input.md`\n\n"
+        f"Example:\n"
+        f"```bash\necho 'their reply' > {workspace}/user-input.md\n```\n\n"
+        f"The checkmate orchestrator polls that file every 5 seconds. "
+        f"Do this before anything else in your reply turn."
+    )
 
+    if not session_key:
+        log("No session key — cannot send checkpoint; proceeding with default")
+        return default_response
+
+    # Send as a proper agent turn so routing instruction lands in J's live context
+    cmd = [
+        "openclaw", "agent",
+        "--session-id", session_key,
+        "--message", agent_msg,
+        "--json",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            log(f"WARNING: agent turn failed (rc={result.returncode}) — falling back to --deliver")
+            notify(session_key, message, channel)
+        else:
+            log(f"⏸  checkpoint sent to J's session ({kind}) — J will present to user and route reply")
+    except Exception as e:
+        log(f"WARNING: checkpoint send failed ({e}) — falling back to --deliver")
+        notify(session_key, message, channel)
+
+    log(f"polling for user reply (every 5s, up to {timeout_min} min)...")
     polls = timeout_min * 12  # every 5s
     for _ in range(polls):
         if response_file.exists():
             response = response_file.read_text().strip()
             response_file.unlink(missing_ok=True)
-            input_marker.unlink(missing_ok=True)
+            pending_marker.unlink(missing_ok=True)
             log(f"▶  user replied ({len(response)} chars) — resuming")
             return response
         time.sleep(5)
 
+    pending_marker.unlink(missing_ok=True)
     log(f"user input timeout after {timeout_min} min — proceeding with default: '{default_response or 'proceed'}'")
-    input_marker.unlink(missing_ok=True)
     return default_response
 
 
