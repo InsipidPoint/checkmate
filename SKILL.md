@@ -40,7 +40,7 @@ scripts/run.py  (deterministic Python while loop — the orchestrator)
 
 When the orchestrator needs user input, it:
 1. Writes `workspace/pending-input.json` (kind + workspace path)
-2. Sends a notification via `--session-key` and `--channel`
+2. Sends a notification via `--recipient` and `--channel`
 3. Polls `workspace/user-input.md` every 5s (up to `--checkpoint-timeout` minutes)
 
 The main agent acts as the bridge: when `pending-input.json` exists and the user replies, the agent writes their response to `user-input.md`. The orchestrator picks it up automatically.
@@ -56,7 +56,7 @@ Workers get full agent runtime: exec, web_search, web_fetch, all skills, session
 
 When checkmate is triggered:
 
-1. **Get session key**: call `session_status` — note the sessionKey
+1. **Get recipient ID**: your channel-specific identifier (e.g. Telegram user ID, E.164 phone number)
 2. **Create workspace**:
    ```bash
    bash <skill-path>/scripts/workspace.sh /tmp "TASK"
@@ -69,7 +69,7 @@ When checkmate is triggered:
      --workspace /tmp/checkmate-TIMESTAMP \
      --task "FULL TASK DESCRIPTION" \
      --max-iter 10 \
-     --session-key SESSION_KEY \
+     --recipient RECIPIENT \
      --channel <your-channel>
    ```
    Use `exec` with `background=true`. This runs for as long as needed.
@@ -109,7 +109,7 @@ The orchestrator polls for this file every 30 seconds. Once written, it resumes 
 | `--max-iter` | 10 | Main loop iterations (increase to 20 for complex tasks) |
 | `--worker-timeout` | 3600s | Per worker session |
 | `--judge-timeout` | 300s | Per judge session |
-| `--session-key` | — | Your session key; used to deliver checkpoints and result |
+| `--recipient` | — | Channel recipient ID (e.g. Telegram user ID, phone number in E.164); used to deliver checkpoints and result |
 | `--channel` | — | Delivery channel for notifications (e.g. `telegram`, `whatsapp`, `signal`) |
 | `--no-interactive` | off | Disable user checkpoints (batch mode) |
 | `--checkpoint-timeout` | 60 | Minutes to wait for user reply at each checkpoint |

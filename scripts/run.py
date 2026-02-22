@@ -82,30 +82,36 @@ def call_agent(prompt: str, session_id: str, timeout_s: int = 3600,
     raise RuntimeError(f"call_agent failed after {max_retries} retries (persistent rate limit)")
 
 
-def notify(session_key: str, message: str, channel: str):
-    """Deliver a plain message to the user (no routing; for final results/errors)."""
-    if not session_key:
-        log("No session key — result written to workspace/final-output.md")
+def notify(recipient: str, message: str, channel: str):
+    """
+    Deliver a plain message to the user via --to <recipient> --deliver --channel <channel>.
+    recipient is the channel-specific target ID (e.g. Telegram user ID, phone number).
+    """
+    if not recipient:
+        log("No recipient — result written to workspace/final-output.md only")
         return
     cmd = [
         "openclaw", "agent",
-        "--session-id", session_key,
+        "--to", recipient,
         "--message", message,
         "--deliver",
         "--channel", channel,
     ]
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        log(f"Delivered message to session {session_key}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            log(f"📨 delivered to {recipient} via {channel}")
+        else:
+            log(f"⚠️  delivery failed (rc={result.returncode}): {(result.stderr or result.stdout)[:200]}")
     except Exception as e:
-        log(f"Notification failed ({e})")
+        log(f"⚠️  delivery failed ({e})")
 
 
 # ── User input / checkpoint system ────────────────────────────────────────────
 
 def request_user_input(
     workspace: Path,
-    session_key: str,
+    recipient: str,
     channel: str,
     message: str,
     kind: str = "input",          # "input" | "confirm" | "checkpoint"
@@ -113,23 +119,15 @@ def request_user_input(
     default_response: str = "",   # returned on timeout (empty = proceed as-is)
 ) -> str:
     """
-    Pause the run, send a checkpoint to the calling session, then poll for the user's reply.
+    Pause the run, send a checkpoint to the user, then poll for their reply.
 
-    Notification strategy:
-      PRIMARY — agent-turn injection: injects a message into the agent's live session
-        containing the user-facing checkpoint AND a routing instruction. The agent
-        processes it, presents the checkpoint to the user, and already has context to
-        write the user's reply to user-input.md.
-
-      FALLBACK — --deliver push: if agent-turn fails, sends directly to the channel.
-        The fallback message embeds the same routing instruction addressed to the agent,
-        so it appears in conversation history — the agent sees it when the user replies
-        and can still route correctly.
-
-    Failures are logged loudly (not silently) so the agent is aware routing context
-    may be missing and can fall back to checking pending-input.json.
+    Delivery: uses --deliver to push the message directly to the user's channel.
+    The message embeds a routing instruction addressed to the agent so that when
+    the user replies, the agent sees it in conversation history and writes the
+    response to user-input.md.
 
     The orchestrator polls user-input.md every 5s.
+    pending-input.json is written as a safety net for heartbeat-based routing.
     """
     response_file  = workspace / "user-input.md"
     pending_marker = workspace / "pending-input.json"
@@ -138,7 +136,7 @@ def request_user_input(
     if response_file.exists():
         response_file.unlink()
 
-    # Write marker (heartbeat safety net — agent checks this if routing context was lost)
+    # Write marker (safety net: agent can check this on any turn if routing context was lost)
     marker = {
         "kind": kind,
         "waiting_since": datetime.now(timezone.utc).isoformat(),
@@ -147,55 +145,19 @@ def request_user_input(
     }
     write_file(pending_marker, json.dumps(marker, indent=2))
 
-    if not session_key:
-        log("No session key — cannot send checkpoint; proceeding with default")
+    if not recipient:
+        log("No recipient — cannot send checkpoint; proceeding with default")
         return default_response
 
-    routing_instruction = (
-        f"⚙️ **Routing instruction:** When the user replies, immediately write their "
-        f"exact reply to `{workspace}/user-input.md` before anything else.\n"
-        f"The checkmate orchestrator polls that file every 5 seconds."
-    )
-
-    # ── Primary: agent-turn injection (routing context lands in agent's live session) ──
-    agent_msg = (
-        f"[checkmate {kind}]\n\n"
+    # Embed routing instruction so agent sees it in conversation history on next turn
+    full_msg = (
         f"{message}\n\n"
         f"---\n"
-        f"{routing_instruction}"
+        f"⚙️ *[Agent routing: write the user's reply to `{workspace}/user-input.md` "
+        f"before responding. The orchestrator polls that file every 5 seconds.]*"
     )
-    cmd = [
-        "openclaw", "agent",
-        "--session-id", session_key,
-        "--message", agent_msg,
-        "--json",
-    ]
-    agent_turn_ok = False
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode == 0:
-            agent_turn_ok = True
-            log(f"⏸  checkpoint sent via agent-turn ({kind})")
-        else:
-            log(
-                f"⚠️  CHECKPOINT DELIVERY FAILED: agent-turn returned rc={result.returncode} "
-                f"— falling back to --deliver. Routing context may be missing from agent session."
-            )
-    except Exception as e:
-        log(
-            f"⚠️  CHECKPOINT DELIVERY FAILED: agent-turn exception ({e}) "
-            f"— falling back to --deliver. Routing context may be missing from agent session."
-        )
-
-    # ── Fallback: --deliver push (embeds routing note so it lands in conversation history) ──
-    if not agent_turn_ok:
-        fallback_msg = (
-            f"{message}\n\n"
-            f"---\n"
-            f"_(checkmate fallback notification — agent-turn delivery failed)_\n\n"
-            f"{routing_instruction}"
-        )
-        notify(session_key, fallback_msg, channel)
+    log(f"⏸  checkpoint ({kind}) — notifying {recipient} via {channel}")
+    notify(recipient, full_msg, channel)
 
     log(f"polling for user reply (every 5s, up to {timeout_min} min)...")
     polls = timeout_min * 12  # every 5s
@@ -252,7 +214,7 @@ def extract_criteria_feedback(verdict: str) -> str:
 
 
 def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
-               session_key: str = "", channel: str = "telegram",
+               recipient: str = "", channel: str = "telegram",
                interactive: bool = True) -> str:
     criteria_path = workspace / "criteria.md"
     if criteria_path.exists():
@@ -275,7 +237,7 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
         write_file(intake_dir / "criteria-draft.md", criteria)
 
         # Pause for user review after each draft (interactive mode)
-        if interactive and session_key:
+        if interactive and recipient:
             user_msg = (
                 f"📋 *checkmate: criteria draft (intake {i}/{max_intake_iter})*\n\n"
                 f"{criteria}\n\n"
@@ -286,7 +248,7 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
                 f"Workspace: `{workspace}`"
             )
             response = request_user_input(
-                workspace, session_key, channel,
+                workspace, recipient, channel,
                 message=user_msg,
                 kind="confirm-criteria",
                 timeout_min=60,
@@ -323,9 +285,9 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
             f"WARNING: intake: reached max iterations ({max_intake_iter}) without approval — "
             f"proceeding with best-effort criteria"
         )
-        if session_key:
+        if recipient:
             notify(
-                session_key,
+                recipient,
                 (
                     f"⚠️ checkmate: criteria intake hit max iterations ({max_intake_iter}) without approval.\n"
                     f"Proceeding with best-effort criteria — results may be less reliable.\n"
@@ -340,14 +302,14 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
 
 
 def confirm_prestart(workspace: Path, task: str, criteria: str,
-                     session_key: str, channel: str,
+                     recipient: str, channel: str,
                      timeout_min: int = 60) -> bool:
     """
     Show the user the final task + criteria and ask for explicit go-ahead before the main loop.
     Returns True if approved, False if user cancelled.
-    Interactive gate — skipped if session_key is empty.
+    Interactive gate — skipped if recipient is empty.
     """
-    if not session_key:
+    if not recipient:
         return True
 
     msg = (
@@ -363,7 +325,7 @@ def confirm_prestart(workspace: Path, task: str, criteria: str,
     )
 
     response = request_user_input(
-        workspace, session_key, channel,
+        workspace, recipient, channel,
         message=msg,
         kind="prestart-confirm",
         timeout_min=timeout_min,
@@ -379,7 +341,7 @@ def confirm_prestart(workspace: Path, task: str, criteria: str,
         new_task = m.group(1).strip()
         write_file(workspace / "task.md", new_task)
         log(f"pre-start: user updated task ({len(new_task)} chars)")
-        notify(session_key, f"✏️ Task updated. Starting worker loop with revised task.", channel)
+        notify(recipient, f"✏️ Task updated. Starting worker loop with revised task.", channel)
 
     log("pre-start: user confirmed — starting main loop")
     return True
@@ -387,14 +349,14 @@ def confirm_prestart(workspace: Path, task: str, criteria: str,
 
 def run_iteration_checkpoint(workspace: Path, iteration: int, max_iter: int,
                               output: str, verdict: str, gaps: str,
-                              session_key: str, channel: str,
+                              recipient: str, channel: str,
                               timeout_min: int = 30) -> str:
     """
     After a FAIL verdict, pause and show the user a summary.
     Returns additional feedback from user (empty = continue as-is).
-    Skipped if session_key is empty.
+    Skipped if recipient is empty.
     """
-    if not session_key:
+    if not recipient:
         return gaps
 
     # Extract score for the summary
@@ -414,7 +376,7 @@ def run_iteration_checkpoint(workspace: Path, iteration: int, max_iter: int,
     )
 
     response = request_user_input(
-        workspace, session_key, channel,
+        workspace, recipient, channel,
         message=msg,
         kind="iteration-checkpoint",
         timeout_min=timeout_min,
@@ -515,7 +477,7 @@ def main():
     parser.add_argument("--workspace",        required=True, help="Workspace directory path")
     parser.add_argument("--task",             default="",    help="Task text (or read from workspace/task.md)")
     parser.add_argument("--max-iter",         type=int, default=10)
-    parser.add_argument("--session-key",      default="",    help="Main session key for result delivery")
+    parser.add_argument("--recipient",      default="",    help="Channel recipient ID (e.g. Telegram user ID, phone number in E.164)")
     parser.add_argument("--channel",          default="telegram")
     parser.add_argument("--worker-timeout",   type=int, default=3600, help="Seconds per worker turn (default: 3600)")
     parser.add_argument("--judge-timeout",    type=int, default=300,  help="Seconds per judge turn (default: 300)")
@@ -542,7 +504,7 @@ def main():
 
     start_iter  = state.get("iteration", 0) + 1
     max_iter    = args.max_iter
-    session_key = args.session_key
+    recipient = args.recipient
 
     log(f"starting — iterations {start_iter}–{max_iter}, workspace={workspace}, interactive={interactive}")
 
@@ -550,7 +512,7 @@ def main():
     criteria = run_intake(
         workspace, task,
         max_intake_iter=args.max_intake_iter,
-        session_key=session_key,
+        recipient=recipient,
         channel=args.channel,
         interactive=interactive,
     )
@@ -560,7 +522,7 @@ def main():
         task = read_file(workspace / "task.md") or task  # user may have edited it
         approved = confirm_prestart(
             workspace, task, criteria,
-            session_key=session_key,
+            recipient=recipient,
             channel=args.channel,
             timeout_min=args.checkpoint_timeout,
         )
@@ -604,7 +566,7 @@ def main():
                 save_state(workspace, {"iteration": iteration, "status": "pass"})
                 log(f"✅ PASSED on iteration {iteration}/{max_iter}")
                 notify(
-                    args.session_key,
+                    args.recipient,
                     f"✅ checkmate: PASSED on iteration {iteration}/{max_iter}\n\n{output}",
                     args.channel,
                 )
@@ -613,11 +575,11 @@ def main():
             gaps = extract_gaps(verdict)
 
             # ── Per-iteration checkpoint (interactive) ──────────────────────
-            if interactive and session_key and iteration < max_iter:
+            if interactive and recipient and iteration < max_iter:
                 gaps = run_iteration_checkpoint(
                     workspace, iteration, max_iter,
                     output, verdict, gaps,
-                    session_key=session_key,
+                    recipient=recipient,
                     channel=args.channel,
                     timeout_min=args.checkpoint_timeout,
                 )
@@ -640,7 +602,7 @@ def main():
     best_verdict = read_file(workspace / f"iter-{best_iter:02d}" / "verdict.md")
     log(f"⚠️ max iterations reached — best attempt was iter {best_iter}")
     notify(
-        args.session_key,
+        args.recipient,
         (
             f"⚠️ checkmate: max iterations ({max_iter}) reached without full PASS\n\n"
             f"Best attempt: iteration {best_iter}\n\n{best_output}\n\n"
