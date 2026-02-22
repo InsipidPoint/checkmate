@@ -1,65 +1,59 @@
 ---
 name: checkmate
-description: "Iterative task completion with a judge loop. Converts a vague task into machine-checkable criteria, runs a worker to produce output, then loops through a judge until PASS or max iterations. Use when: (1) a task needs quality guarantees, not just a best-effort attempt; (2) output must meet specific criteria before delivery; (3) you want to iterate autonomously until something is truly done. Triggers on 'checkmate: TASK', 'until it passes', 'keep iterating until', 'quality loop', 'judge and retry'."
+description: "Iterative task completion with a judge loop. Converts a vague task into machine-checkable criteria, spawns a worker sub-agent to produce output, judges the result, and respawns with feedback until PASS or max iterations. Designed for long-running tasks: supports dozens of iterations over hours. Use when: (1) a task needs quality guarantees, not just a best-effort attempt; (2) output must meet specific criteria before delivery; (3) you want autonomous iteration until something is truly done. Triggers on 'checkmate: TASK', 'until it passes', 'keep iterating until done', 'quality loop', 'judge and retry'."
 ---
 
 # Checkmate
 
-Checkmate runs an intake → work → judge → repeat loop. Nothing leaves until it passes.
+Spawn an orchestrator sub-agent that runs intake → worker → judge in a loop until PASS.
 
-## How It Works
-
-```
-Task → Intake (criteria.md) → Worker → Judge → PASS? → Done
-                                  ↑________________________| FAIL + gaps
-```
-
-1. **Intake** — converts the user's vague task into a `criteria.md` of machine-checkable acceptance criteria
-2. **Worker** — completes the task (inline or as a sub-agent)
-3. **Judge** — reads `criteria.md` + output, returns structured `PASS` or `FAIL` with specific gaps
-4. **Loop** — if FAIL, worker retries with judge feedback; if PASS, deliver to user
-
-## Invocation
+## Flow
 
 ```
-checkmate: <task description>
+You (main agent)
+  └─ spawn: Orchestrator sub-agent (long-running)
+        ├─ Intake (inline) → criteria.md
+        └─ Loop [up to max_iter]:
+              ├─ spawn: Worker sub-agent → output.md
+              ├─ Judge (inline) → verdict.md
+              ├─ PASS → notify you → done
+              └─ FAIL → update feedback.md → next iteration
 ```
 
-Or naturally: "keep iterating until it's right", "run it through a judge", "don't stop until it passes"
+## Your Job (main agent)
 
-## Workflow
+When checkmate is triggered:
 
-### Step 1: Run Intake
-Load `prompts/intake.md`. Fill in the task. Output → `checkmate/criteria.md`.
+1. **Create workspace**: `memory/checkmate-<timestamp>/` (use `scripts/workspace.sh`)
+2. **Write `task.md`** to workspace: the full task description + any context
+3. **Spawn orchestrator sub-agent** using `prompts/orchestrator.md` as the task template
+   - Fill in: `WORKSPACE`, `TASK`, `MAX_ITER`, `SKILL_DIR`, your `SESSION_KEY`
+   - Use model: `anthropic/claude-sonnet-4-6`
+   - Set `runTimeoutSeconds`: estimate generously — default to **14400** (4 hours)
+   - Set `mode: "run"`
+4. **Tell the user** checkmate is running, what it's working on, and that you'll notify them when done
 
-### Step 2: Run Worker
-Complete the task. Save output → `checkmate/output.md` (or appropriate file).
+## Orchestrator task template variables
 
-### Step 3: Run Judge
-Load `prompts/judge.md`. Provide `criteria.md` + output. Returns structured verdict.
+| Variable | Value |
+|---|---|
+| `WORKSPACE` | Absolute path to `memory/checkmate-<timestamp>/` |
+| `TASK` | Full task description |
+| `MAX_ITER` | Default **20**; increase for complex tasks |
+| `SKILL_DIR` | Absolute path to this skill directory |
+| `SESSION_KEY` | Your current session key (from session_status) |
 
-### Step 4: Loop or Deliver
-- **PASS** → deliver output to user, clean up workspace
-- **FAIL** → extract gaps from judge verdict, pass to worker as feedback, increment iteration counter
+## Passing the orchestrator task
 
-### Limits
-- Default max iterations: **5**
-- If still failing at max: surface the best attempt + final judge report to the user
-- Always show iteration count to user: `[checkmate: iteration 2/5]`
+Read `prompts/orchestrator.md`, substitute the variables above, and use that as the `task` argument to `sessions_spawn`.
 
-## Workspace
+## On completion
 
-Use a temporary working directory: `memory/checkmate-<timestamp>/`
+The orchestrator will call `sessions_send` to your session with the final output or failure report. Deliver it to the user.
 
-Files:
-- `criteria.md` — acceptance criteria (written by intake)
-- `output.md` — current best output (overwritten each iteration)  
-- `verdict.md` — last judge report
+## Defaults
 
-Clean up after PASS delivery unless user asks to keep.
-
-## Prompts
-
-- **Intake**: `prompts/intake.md` — converts task → criteria.md
-- **Judge**: `prompts/judge.md` — evaluates output against criteria, returns PASS/FAIL
-- **Orchestrator**: `prompts/orchestrator.md` — loop controller pattern reference
+- Max iterations: **20** (override if user specifies)
+- Worker timeout per iteration: **3600s** (1 hour)
+- Judge: runs inline inside orchestrator (no sub-agent needed)
+- Intake: runs inline inside orchestrator
