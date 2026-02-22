@@ -1,12 +1,32 @@
 ---
 name: checkmate
-description: "Iterative task loop with a judge: converts your goal into machine-checkable criteria, runs a worker, judges output, feeds back gaps, repeats until PASS. Use when correctness matters. Triggers: 'checkmate: TASK', 'keep going until done', 'quality loop'."
+description: "Iterative task loop with a judge: converts a goal into machine-checkable criteria, runs a worker, judges output, feeds back gaps, repeats until PASS. For tasks where correctness matters and best-effort isn't enough. Say 'checkmate: TASK' to trigger."
 ---
 
 # Checkmate
 
 A deterministic Python loop (`scripts/run.py`) calls an LLM for worker and judge roles.
 Nothing leaves until it passes — and you stay in control at every checkpoint.
+
+## When to Use
+
+Use checkmate when correctness matters more than speed — when "good enough on the first try" isn't acceptable.
+
+**Good fits:**
+- Code that must pass tests or meet a spec
+- Docs or reports that must hit a defined quality bar
+- Research that must be thorough and cover specific ground
+- Any task where you'd otherwise iterate manually until satisfied
+
+**Trigger phrases** (say any of these):
+- `checkmate: TASK`
+- `keep iterating until it passes`
+- `don't stop until done`
+- `until it passes`
+- `quality loop: TASK`
+- `iterate until satisfied`
+- `judge and retry`
+- `keep going until done`
 
 ## Architecture
 
