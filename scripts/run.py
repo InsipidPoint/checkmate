@@ -295,8 +295,9 @@ def main():
         log(f"workspace already completed with status={state['status']} — exiting")
         return
 
-    start_iter = state.get("iteration", 0) + 1
-    max_iter   = args.max_iter
+    start_iter  = state.get("iteration", 0) + 1
+    max_iter    = args.max_iter
+    session_key = args.session_key
 
     log(f"starting — iterations {start_iter}–{max_iter}, workspace={workspace}")
 
