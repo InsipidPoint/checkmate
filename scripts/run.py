@@ -91,6 +91,11 @@ def notify(recipient: str, message: str, channel: str):
     if not recipient:
         log("No recipient — result written to workspace/final-output.md only")
         return
+    # Telegram limit is 4096 chars; truncate with a note if needed
+    MAX_MSG = 3800
+    if len(message) > MAX_MSG:
+        message = message[:MAX_MSG] + f"\n\n…_(truncated — see workspace for full content)_"
+
     cmd = [
         "openclaw", "message", "send",
         "--channel", channel,
@@ -312,16 +317,14 @@ def confirm_prestart(workspace: Path, task: str, criteria: str,
     if not recipient:
         return True
 
+    task_preview = task.strip().splitlines()[0][:200]
+    criteria_count = criteria.count("- [ ]") + criteria.count("- [x]")
     msg = (
-        f"✅ *checkmate: intake complete — ready to start work*\n\n"
-        f"**Task:**\n{task}\n\n"
-        f"**Final Criteria:**\n{criteria}\n\n"
-        f"---\n"
-        f"Reply with:\n"
-        f"• **go / start / ok** — begin the worker loop\n"
-        f"• **edit task: ...** — update the task description first\n"
-        f"• **cancel** — abort\n\n"
-        f"Workspace: `{workspace}`"
+        f"✅ *checkmate: ready to start*\n\n"
+        f"**Task:** {task_preview}{'…' if len(task.strip()) > 200 else ''}\n"
+        f"**Criteria:** {criteria_count} items locked\n"
+        f"**Workspace:** `{workspace}`\n\n"
+        f"Reply: **go** to start · **cancel** to abort · **edit task: ...** to revise"
     )
 
     response = request_user_input(
