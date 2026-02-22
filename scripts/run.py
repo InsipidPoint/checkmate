@@ -101,39 +101,70 @@ def notify(session_key: str, message: str, channel: str):
         log(f"Notification failed ({e})")
 
 
-def request_clarification(workspace: Path, session_key: str, questions: str, channel: str) -> str:
+# ── User input / checkpoint system ────────────────────────────────────────────
+
+def request_user_input(
+    workspace: Path,
+    session_key: str,
+    channel: str,
+    message: str,
+    kind: str = "input",          # "input" | "confirm" | "checkpoint"
+    timeout_min: int = 60,
+    default_response: str = "",   # returned on timeout (empty = proceed as-is)
+) -> str:
     """
-    Pause the run, ask the user clarifying questions, wait for response (up to 30 min).
-    Returns the clarification text, or empty string if timed out.
+    Pause the run, send `message` to the user, wait up to `timeout_min` minutes for a reply.
+
+    Bridge mechanism:
+      - Writes `workspace/pending-input.json` so J (main session heartbeat) knows to relay
+      - J writes the user's reply to `workspace/user-input.md`
+      - We poll that file every 30s; when it appears we read+delete it and return the response
+
+    If the file never appears within timeout, returns `default_response`.
     """
-    clarification_path = workspace / "pending-clarification.md"
-    response_path      = workspace / "clarification-response.md"
+    input_marker  = workspace / "pending-input.json"
+    response_file = workspace / "user-input.md"
 
-    write_file(clarification_path, questions)
+    # Remove any stale response from a prior checkpoint
+    if response_file.exists():
+        response_file.unlink()
 
-    msg = (
-        f"[checkmate: clarification needed]\n\n"
-        f"{questions}\n\n"
-        f"---\n"
-        f"Please answer the above. I'll incorporate your answers and continue.\n"
-        f"Workspace: {workspace}"
-    )
-    notify(session_key, msg, channel)
-    log("paused — waiting for clarification (up to 30 min)...")
+    # Write marker so heartbeat knows we're waiting
+    marker = {
+        "kind": kind,
+        "waiting_since": datetime.now(timezone.utc).isoformat(),
+        "timeout_min": timeout_min,
+        "workspace": str(workspace),
+        "channel": channel,
+        "session_key": session_key,
+    }
+    write_file(input_marker, json.dumps(marker, indent=2))
 
-    for _ in range(60):  # 60 × 30s = 30 min
-        if response_path.exists():
-            response = response_path.read_text().strip()
-            log(f"clarification received ({len(response)} chars) — resuming")
-            clarification_path.unlink(missing_ok=True)
-            # Append clarification to task.md so future intake sessions see it
-            with open(workspace / "task.md", "a") as f:
-                f.write(f"\n\n## User Clarification\n\n{response}\n")
+    # Notify user
+    notify(session_key, message, channel)
+    log(f"⏸  paused ({kind}) — waiting for user reply (up to {timeout_min} min)...")
+
+    polls = timeout_min * 2  # every 30s
+    for _ in range(polls):
+        if response_file.exists():
+            response = response_file.read_text().strip()
+            response_file.unlink(missing_ok=True)
+            input_marker.unlink(missing_ok=True)
+            log(f"▶  user replied ({len(response)} chars) — resuming")
             return response
         time.sleep(30)
 
-    log("clarification timeout — proceeding with existing task description")
-    return ""
+    log(f"user input timeout after {timeout_min} min — proceeding with default: '{default_response or 'proceed'}'")
+    input_marker.unlink(missing_ok=True)
+    return default_response
+
+
+def is_approval(response: str) -> bool:
+    """Treat empty, 'yes', 'ok', 'approve', 'lgtm', 'continue', 'proceed', 'go' as approval."""
+    if not response.strip():
+        return True
+    return bool(re.match(r"^\s*(yes|ok|okay|approve|approved|lgtm|continue|proceed|go|good|looks good|ship it)\s*[.!]?\s*$",
+                         response.strip(), re.IGNORECASE))
 
 
 # ── Stages ────────────────────────────────────────────────────────────────────
@@ -167,7 +198,8 @@ def extract_criteria_feedback(verdict: str) -> str:
 
 
 def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
-               session_key: str = "", channel: str = "telegram") -> str:
+               session_key: str = "", channel: str = "telegram",
+               interactive: bool = True) -> str:
     criteria_path = workspace / "criteria.md"
     if criteria_path.exists():
         log("intake: criteria.md already exists, skipping")
@@ -178,7 +210,7 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
     _criteria_approved = False
 
     for i in range(1, max_intake_iter + 1):
-        # Re-read task each iteration (may have been updated with clarification)
+        # Re-read task each iteration (may have been updated with user clarification)
         task = read_file(workspace / "task.md") or task
 
         log(f"intake: iteration {i}/{max_intake_iter} — drafting criteria...")
@@ -188,15 +220,38 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
         intake_dir.mkdir(parents=True, exist_ok=True)
         write_file(intake_dir / "criteria-draft.md", criteria)
 
-        # Check if intake is asking for user clarification
-        if "[NEEDS_CLARIFICATION]" in criteria:
-            log(f"intake: needs user clarification (iter {i})")
-            questions = criteria.split("[NEEDS_CLARIFICATION]", 1)[1].strip()
-            clarification = request_clarification(workspace, session_key, questions, channel)
-            if clarification:
-                feedback = f"User clarification provided:\n{clarification}"
-            continue
+        # Pause for user review after each draft (interactive mode)
+        if interactive and session_key:
+            user_msg = (
+                f"📋 *checkmate: criteria draft (intake {i}/{max_intake_iter})*\n\n"
+                f"{criteria}\n\n"
+                f"---\n"
+                f"Reply with:\n"
+                f"• **ok / approve** — lock these criteria and proceed\n"
+                f"• **feedback or edits** — I'll revise before moving on\n\n"
+                f"Workspace: `{workspace}`"
+            )
+            response = request_user_input(
+                workspace, session_key, channel,
+                message=user_msg,
+                kind="confirm-criteria",
+                timeout_min=60,
+                default_response="proceed",
+            )
 
+            if is_approval(response):
+                log(f"intake: user approved criteria on iteration {i}")
+                _criteria_approved = True
+                break
+            else:
+                # User gave feedback — append it and continue refining
+                log(f"intake: user requested changes — refining")
+                feedback = f"User review feedback:\n{response}"
+                write_file(intake_dir / "user-feedback.md", response)
+                continue
+
+        # Non-interactive: use criteria-judge as gatekeeper
+        # (Interactive mode skips judge since user approval is the real gate)
         log(f"intake: judging criteria quality (iter {i})...")
         verdict, approved = run_criteria_judge(task, criteria, i)
         write_file(intake_dir / "criteria-verdict.md", verdict)
@@ -211,22 +266,120 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
 
     if not _criteria_approved:
         log(
-            f"WARNING: intake: reached max iterations ({max_intake_iter}) without APPROVED verdict — "
-            f"proceeding with best-effort criteria (criteria quality may be suboptimal)"
+            f"WARNING: intake: reached max iterations ({max_intake_iter}) without approval — "
+            f"proceeding with best-effort criteria"
         )
-        notify(
-            session_key,
-            (
-                f"⚠️ checkmate: criteria intake could not reach APPROVED after {max_intake_iter} iterations.\n"
-                f"Proceeding with best-effort criteria — results may be less reliable.\n"
-                f"Workspace: {workspace}"
-            ),
-            channel,
-        )
+        if session_key:
+            notify(
+                session_key,
+                (
+                    f"⚠️ checkmate: criteria intake hit max iterations ({max_intake_iter}) without approval.\n"
+                    f"Proceeding with best-effort criteria — results may be less reliable.\n"
+                    f"Workspace: {workspace}"
+                ),
+                channel,
+            )
 
     write_file(criteria_path, criteria)
     log(f"intake: locked criteria.md ({len(criteria)} chars)")
     return criteria
+
+
+def confirm_prestart(workspace: Path, task: str, criteria: str,
+                     session_key: str, channel: str,
+                     timeout_min: int = 60) -> bool:
+    """
+    Show the user the final task + criteria and ask for explicit go-ahead before the main loop.
+    Returns True if approved, False if user cancelled.
+    Interactive gate — skipped if session_key is empty.
+    """
+    if not session_key:
+        return True
+
+    msg = (
+        f"✅ *checkmate: intake complete — ready to start work*\n\n"
+        f"**Task:**\n{task}\n\n"
+        f"**Final Criteria:**\n{criteria}\n\n"
+        f"---\n"
+        f"Reply with:\n"
+        f"• **go / start / ok** — begin the worker loop\n"
+        f"• **edit task: ...** — update the task description first\n"
+        f"• **cancel** — abort\n\n"
+        f"Workspace: `{workspace}`"
+    )
+
+    response = request_user_input(
+        workspace, session_key, channel,
+        message=msg,
+        kind="prestart-confirm",
+        timeout_min=timeout_min,
+        default_response="go",
+    )
+
+    if re.match(r"^\s*cancel\s*$", response.strip(), re.IGNORECASE):
+        log("pre-start: user cancelled — aborting")
+        return False
+
+    if re.match(r"^\s*edit task:\s*(.+)", response.strip(), re.IGNORECASE | re.DOTALL):
+        m = re.match(r"^\s*edit task:\s*(.+)", response.strip(), re.IGNORECASE | re.DOTALL)
+        new_task = m.group(1).strip()
+        write_file(workspace / "task.md", new_task)
+        log(f"pre-start: user updated task ({len(new_task)} chars)")
+        notify(session_key, f"✏️ Task updated. Starting worker loop with revised task.", channel)
+
+    log("pre-start: user confirmed — starting main loop")
+    return True
+
+
+def run_iteration_checkpoint(workspace: Path, iteration: int, max_iter: int,
+                              output: str, verdict: str, gaps: str,
+                              session_key: str, channel: str,
+                              timeout_min: int = 30) -> str:
+    """
+    After a FAIL verdict, pause and show the user a summary.
+    Returns additional feedback from user (empty = continue as-is).
+    Skipped if session_key is empty.
+    """
+    if not session_key:
+        return gaps
+
+    # Extract score for the summary
+    score_m = re.search(r"\*\*Score:\*\*\s*(\d+)/(\d+)", verdict)
+    score = score_m.group(0) if score_m else ""
+
+    msg = (
+        f"🔄 *checkmate: iteration {iteration}/{max_iter} — FAIL*\n\n"
+        f"{score}\n\n"
+        f"**Top gaps:**\n{gaps[:800] if gaps else '(none extracted)'}\n\n"
+        f"---\n"
+        f"Reply with:\n"
+        f"• **continue** — proceed with next iteration using judge's feedback\n"
+        f"• **redirect: ...** — add your own direction for the next worker\n"
+        f"• **stop** — end the loop and take the best result so far\n\n"
+        f"Workspace: `{workspace}`"
+    )
+
+    response = request_user_input(
+        workspace, session_key, channel,
+        message=msg,
+        kind="iteration-checkpoint",
+        timeout_min=timeout_min,
+        default_response="continue",
+    )
+
+    if re.match(r"^\s*stop\s*$", response.strip(), re.IGNORECASE):
+        log(f"checkpoint: user requested stop after iteration {iteration}")
+        return "__STOP__"
+
+    if re.match(r"^\s*redirect:\s*(.+)", response.strip(), re.IGNORECASE | re.DOTALL):
+        m = re.match(r"^\s*redirect:\s*(.+)", response.strip(), re.IGNORECASE | re.DOTALL)
+        user_direction = m.group(1).strip()
+        log(f"checkpoint: user redirected — adding to feedback")
+        return f"{gaps}\n\n## User Direction (iteration {iteration})\n{user_direction}"
+
+    # "continue" or timeout → use judge's gaps as-is
+    log(f"checkpoint: continuing with judge feedback")
+    return gaps
 
 
 def run_worker(workspace: Path, task: str, criteria: str, feedback: str,
@@ -305,18 +458,22 @@ def find_best_iteration(workspace: Path) -> tuple[int, str]:
 
 def main():
     parser = argparse.ArgumentParser(description="Checkmate — deterministic LLM iteration loop")
-    parser.add_argument("--workspace", required=True, help="Workspace directory path")
-    parser.add_argument("--task",        default="",       help="Task text (or read from workspace/task.md)")
-    parser.add_argument("--max-iter",    type=int, default=10)
-    parser.add_argument("--session-key",    default="",       help="Main session key for result delivery")
-    parser.add_argument("--channel",        default="telegram")
+    parser.add_argument("--workspace",        required=True, help="Workspace directory path")
+    parser.add_argument("--task",             default="",    help="Task text (or read from workspace/task.md)")
+    parser.add_argument("--max-iter",         type=int, default=10)
+    parser.add_argument("--session-key",      default="",    help="Main session key for result delivery")
+    parser.add_argument("--channel",          default="telegram")
     parser.add_argument("--worker-timeout",   type=int, default=3600, help="Seconds per worker turn (default: 3600)")
     parser.add_argument("--judge-timeout",    type=int, default=300,  help="Seconds per judge turn (default: 300)")
     parser.add_argument("--max-intake-iter",  type=int, default=5,    help="Max intake refinement iterations (default: 5)")
+    parser.add_argument("--no-interactive",   action="store_true",    help="Disable user checkpoints (batch mode)")
+    parser.add_argument("--checkpoint-timeout", type=int, default=60, help="Minutes to wait for user response at each checkpoint (default: 60)")
     args = parser.parse_args()
 
     workspace = Path(args.workspace)
     workspace.mkdir(parents=True, exist_ok=True)
+
+    interactive = not args.no_interactive
 
     task = args.task or read_file(workspace / "task.md")
     if not task:
@@ -333,11 +490,32 @@ def main():
     max_iter    = args.max_iter
     session_key = args.session_key
 
-    log(f"starting — iterations {start_iter}–{max_iter}, workspace={workspace}")
+    log(f"starting — iterations {start_iter}–{max_iter}, workspace={workspace}, interactive={interactive}")
 
     # ── Intake ────────────────────────────────────────────────────────────────
-    criteria = run_intake(workspace, task, max_intake_iter=args.max_intake_iter,
-                          session_key=session_key, channel=args.channel)
+    criteria = run_intake(
+        workspace, task,
+        max_intake_iter=args.max_intake_iter,
+        session_key=session_key,
+        channel=args.channel,
+        interactive=interactive,
+    )
+
+    # ── Pre-start confirmation gate ────────────────────────────────────────────
+    if interactive:
+        task = read_file(workspace / "task.md") or task  # user may have edited it
+        approved = confirm_prestart(
+            workspace, task, criteria,
+            session_key=session_key,
+            channel=args.channel,
+            timeout_min=args.checkpoint_timeout,
+        )
+        if not approved:
+            save_state(workspace, {"iteration": 0, "status": "cancelled"})
+            log("aborted by user before main loop")
+            return
+        # Re-read criteria in case user edited task (intake locked criteria before edit)
+        criteria = read_file(workspace / "criteria.md")
 
     # ── Loop ──────────────────────────────────────────────────────────────────
     feedback = read_file(workspace / "feedback.md")
@@ -380,15 +558,27 @@ def main():
 
             gaps = extract_gaps(verdict)
 
+            # ── Per-iteration checkpoint (interactive) ──────────────────────
+            if interactive and session_key and iteration < max_iter:
+                gaps = run_iteration_checkpoint(
+                    workspace, iteration, max_iter,
+                    output, verdict, gaps,
+                    session_key=session_key,
+                    channel=args.channel,
+                    timeout_min=args.checkpoint_timeout,
+                )
+                if gaps == "__STOP__":
+                    break
+
         # Accumulate feedback for next worker
-        if gaps:
+        if gaps and gaps != "__STOP__":
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             entry = f"\n## Iteration {iteration} gaps ({ts})\n{gaps}\n"
             with open(workspace / "feedback.md", "a") as f:
                 f.write(entry)
             feedback += entry
 
-    # ── Max iterations reached ────────────────────────────────────────────────
+    # ── Max iterations reached / stopped ──────────────────────────────────────
     best_iter, best_output = find_best_iteration(workspace)
     write_file(workspace / "final-output.md", best_output)
     save_state(workspace, {"iteration": max_iter, "status": "fail"})

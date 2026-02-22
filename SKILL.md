@@ -6,7 +6,7 @@ description: "Iterative task completion with a judge loop. Converts a vague task
 # Checkmate
 
 A deterministic Python loop (`scripts/run.py`) calls an LLM for worker and judge roles.
-Nothing leaves until it passes.
+Nothing leaves until it passes — and you stay in control at every checkpoint.
 
 ## Architecture
 
@@ -14,16 +14,36 @@ Nothing leaves until it passes.
 scripts/run.py  (deterministic Python while loop — the orchestrator)
   ├─ Intake loop [up to max_intake_iter, default 5]:
   │    ├─ Draft criteria (intake prompt + task + refinement feedback)
-  │    ├─ Criteria-judge: are the criteria good enough?
-  │    ├─ APPROVED → lock criteria.md, proceed
-  │    └─ NEEDS_WORK → extract fixes, refine, next intake iteration
+  │    ├─ ⏸ USER REVIEW: show draft → wait for approval or feedback
+  │    │     approved? → lock criteria.md
+  │    │     feedback? → refine, next intake iteration
+  │    └─ (non-interactive: criteria-judge gates instead of user)
+  │
+  ├─ ⏸ PRE-START GATE: show final task + criteria → user confirms "go"
+  │         (edit task / cancel supported here)
+  │
   └─ Main loop [up to max_iter, default 10]:
        ├─ Worker: spawn agent session → iter-N/output.md
        │          (full runtime: exec, web_search, all skills, OAuth auth)
        ├─ Judge:  spawn agent session → iter-N/verdict.md
        ├─ PASS?  → write final-output.md, notify user, exit
-       └─ FAIL?  → extract gaps, append to feedback.md, next iteration
+       └─ FAIL?  → extract gaps → ⏸ CHECKPOINT: show score + gaps to user
+                     continue?  → next iteration (with judge gaps)
+                     redirect:X → next iteration (with user direction appended)
+                     stop?      → end loop, take best result so far
 ```
+
+**Interactive mode** (default): user approves criteria, confirms pre-start, and reviews each FAIL checkpoint.
+**Batch mode** (`--no-interactive`): fully autonomous; criteria-judge gates intake, no checkpoints.
+
+### User Input Bridge
+
+When the orchestrator needs user input, it:
+1. Writes `workspace/pending-input.json` (kind + workspace path)
+2. Sends a Telegram notification via `--session-key`
+3. Polls `workspace/user-input.md` every 30s (up to `--checkpoint-timeout` minutes)
+
+J (main session) acts as the bridge: when `pending-input.json` exists and the user replies in Telegram, J writes their response to `user-input.md`. The orchestrator picks it up automatically.
 
 Each agent session is spawned via:
 ```bash
@@ -48,13 +68,38 @@ When checkmate is triggered:
    python3 /root/clawd/skills/checkmate/scripts/run.py \
      --workspace /root/clawd/memory/checkmate-TIMESTAMP \
      --task "FULL TASK DESCRIPTION" \
-     --max-iter 20 \
+     --max-iter 10 \
      --session-key SESSION_KEY \
      --channel telegram
    ```
    Use `exec` with `background=true`. This runs for as long as needed.
+   Add `--no-interactive` for fully autonomous runs (no user checkpoints).
 
-4. **Tell the user** checkmate is running, what it's working on, and that you'll notify them on Telegram when done.
+4. **Tell the user** checkmate is running, what it's working on, and that they'll receive criteria drafts and checkpoint messages on Telegram to review and approve.
+
+5. **Bridge user replies**: When user responds to a checkpoint message, check for `pending-input.json` and write their response to `workspace/user-input.md`.
+
+## Bridging User Input
+
+**When a checkpoint message arrives in Telegram** (you sent the user a criteria/approval/checkpoint request), bridge their reply:
+
+```bash
+# Find active pending input
+cat /root/clawd/memory/checkmate-*/pending-input.json 2>/dev/null
+
+# Route user's reply
+echo "USER REPLY HERE" > /path/to/workspace/user-input.md
+```
+
+The orchestrator polls for this file every 30 seconds. Once written, it resumes automatically and deletes the file.
+
+**Accepted replies at each gate:**
+
+| Gate | Continue | Redirect | Cancel |
+|------|----------|----------|--------|
+| Criteria review | "ok", "approve", "lgtm" | any feedback text | — |
+| Pre-start | "go", "start", "ok" | "edit task: NEW TASK" | "cancel" |
+| Iteration checkpoint | "continue", (empty) | "redirect: DIRECTION" | "stop" |
 
 ## Parameters
 
@@ -64,50 +109,41 @@ When checkmate is triggered:
 | `--max-iter` | 10 | Main loop iterations (increase to 20 for complex tasks) |
 | `--worker-timeout` | 3600s | Per worker session |
 | `--judge-timeout` | 300s | Per judge session |
-| `--session-key` | — | Your session key; used to deliver result |
-| `--channel` | telegram | Delivery channel for result |
+| `--session-key` | — | Your session key; used to deliver checkpoints and result |
+| `--channel` | telegram | Delivery channel |
+| `--no-interactive` | off | Disable user checkpoints (batch mode) |
+| `--checkpoint-timeout` | 60 | Minutes to wait for user reply at each checkpoint |
 
 ## Workspace layout
 
 ```
 memory/checkmate-YYYYMMDD-HHMMSS/
-├── task.md           # original task
-├── criteria.md       # from intake
-├── feedback.md       # accumulated judge gaps
-├── state.json        # {iteration, status} — resume support
+├── task.md               # task description (user may edit pre-start)
+├── criteria.md           # locked after intake
+├── feedback.md           # accumulated judge gaps + user direction
+├── state.json            # {iteration, status} — resume support
+├── pending-input.json    # written when waiting for user; deleted after response
+├── user-input.md         # J writes user's reply here; read + deleted by orchestrator
+├── intake-01/
+│   ├── criteria-draft.md
+│   ├── criteria-verdict.md  (non-interactive only)
+│   └── user-feedback.md     (interactive: user's review comments)
 ├── iter-01/
-│   ├── output.md     # worker output
-│   └── verdict.md    # judge verdict
-└── final-output.md   # written on completion
+│   ├── output.md         # worker output
+│   └── verdict.md        # judge verdict
+└── final-output.md       # written on completion
 ```
-
-## Handling Clarification Requests
-
-If the intake can't produce testable criteria, it sends a `[checkmate: clarification needed]` message to your session.
-
-**When you receive this:**
-1. Relay the questions to the user naturally
-2. When the user answers, write their response to: `WORKSPACE/clarification-response.md`
-3. The script is polling for that file — it will resume automatically
-
-```bash
-cat > /path/to/workspace/clarification-response.md << 'EOF'
-[user's answers here]
-EOF
-```
-
-The workspace path is included in the clarification message. The script waits up to 30 minutes before timing out.
 
 ## Resume
 
-If the script is interrupted, just re-run it with the same `--workspace`. It reads `state.json` and skips completed steps.
+If the script is interrupted, just re-run it with the same `--workspace`. It reads `state.json` and skips completed steps. Locked `criteria.md` is reused; completed `iter-N/output.md` files are not re-run.
 
 ## Prompts
 
 Active prompts called by `run.py`:
 
 - `prompts/intake.md` — converts task → criteria draft
-- `prompts/criteria-judge.md` — evaluates criteria quality (APPROVED / NEEDS_WORK)
+- `prompts/criteria-judge.md` — evaluates criteria quality (APPROVED / NEEDS_WORK) — used in non-interactive mode
 - `prompts/worker.md` — worker prompt (variables: TASK, CRITERIA, FEEDBACK, ITERATION, MAX_ITER, OUTPUT_PATH)
 - `prompts/judge.md` — evaluates output against criteria (PASS / FAIL)
 
