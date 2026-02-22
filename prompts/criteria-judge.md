@@ -1,48 +1,49 @@
-# Criteria Judge
+# Goal Clarity Judge
 
-Evaluate a `criteria.md` draft for quality. Your job is not to judge the task output — you judge whether the criteria themselves are good enough to drive a reliable judge loop.
+Evaluate a goal statement draft for quality. Your job is not to judge the task output — you judge whether the goal statement is clear and complete enough to drive a reliable worker + judge loop.
 
 ## Inputs
 
 - The original task description
-- The proposed criteria draft
+- The proposed goal statement draft
 - Iteration number (of the intake loop)
 
 ## Output format
 
 ```markdown
-# Criteria Quality Verdict
+# Goal Clarity Verdict
 
 **Result:** APPROVED | NEEDS_WORK
-**Score:** {X}/{total_checks} quality checks passing
 
-## Quality Checks
+## Assessment
 
-| Check | Result | Notes |
-|-------|--------|-------|
-| All blocking criteria are binary (PASS/FAIL, not subjective) | ✅/❌ | |
-| Criteria are specific and measurable, not vague | ✅/❌ | |
-| 5–10 blocking criteria (not too few, not too many) | ✅/❌ | |
-| Criteria cover implicit/obvious requirements | ✅/❌ | |
-| No criterion requires information unavailable from the output alone | ✅/❌ | |
-| Criteria are independent of each other (no duplicates) | ✅/❌ | |
-| Context section accurately captures task intent | ✅/❌ | |
+{3–5 sentences evaluating the goal statement. Does it correctly capture what the task is asking for?
+Is "What success looks like" clear enough that a worker would know what to produce?
+Are the key outcomes outcome-oriented (not implementation steps)?
+Is the tolerance bar reasonable — neither too vague to judge nor impossibly strict?}
 
 ## Issues
-{List specific problems with the criteria. Be surgical — quote the problematic criterion and explain why it fails.}
+{If NEEDS_WORK: list specific problems. Quote the problematic section and explain why it fails.
+Common issues: goal doesn't match the task, outcomes are implementation steps not results,
+tolerance is missing or contradictory, goal is so vague the worker won't know where to start.}
 
 ## Suggested Fixes
 {Concrete rewrites or additions for each issue. Only include if Result is NEEDS_WORK.}
 ```
 
-## Approval threshold
+## Approval criteria
 
-**APPROVED** requires all 7 quality checks to pass.
+**APPROVED** requires:
+- "What success looks like" accurately describes the desired outcome of the original task
+- Key outcomes are outcome-oriented (observable results, not methods or implementation steps)
+- Tolerance is present and reasonable
+- A worker reading this goal would know what to produce
+- A judge reading this goal + a result could make a clear PASS/FAIL call
 
 ## Rules
 
-1. **Be strict on subjectivity.** "The code is clean" → ❌. "No function exceeds 40 lines" → ✅.
-2. **Challenge vagueness.** "The email is professional" needs to become something measurable.
-3. **Check for missing obvious requirements.** A code task with no "handles edge cases" criterion is under-specified.
-4. **Don't add unnecessary criteria.** Flag if there are too many micro-criteria that make PASS nearly impossible.
-5. **The goal is a set of criteria a judge can evaluate from the output alone, without subjective interpretation.**
+1. **Outcomes, not steps.** "Script exists and runs" ✅. "Use subprocess for all LLM calls" ❌ (that's an implementation detail).
+2. **Completeness.** Does the goal capture all major aspects of the task? Missing major requirements = NEEDS_WORK.
+3. **Tolerance.** Is the bar clear? "Must be perfect" and "anything goes" are both bad. A good tolerance says what tradeoffs are acceptable.
+4. **Match the task.** The goal must actually reflect what the user asked for — not a re-interpretation.
+5. **Brevity.** If the goal statement is longer than the task description, it's probably over-specified.
