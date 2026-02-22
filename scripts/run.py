@@ -180,7 +180,7 @@ def main():
     parser = argparse.ArgumentParser(description="Checkmate — deterministic LLM iteration loop")
     parser.add_argument("--workspace", required=True, help="Workspace directory path")
     parser.add_argument("--task",        default="",       help="Task text (or read from workspace/task.md)")
-    parser.add_argument("--max-iter",    type=int, default=20)
+    parser.add_argument("--max-iter",    type=int, default=10)
     parser.add_argument("--session-key",    default="",       help="Main session key for result delivery")
     parser.add_argument("--channel",        default="telegram")
     parser.add_argument("--worker-timeout", type=int, default=3600, help="Seconds per worker turn (default: 3600)")

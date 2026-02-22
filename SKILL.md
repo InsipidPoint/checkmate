@@ -56,7 +56,7 @@ When checkmate is triggered:
 
 | Flag | Default | Notes |
 |------|---------|-------|
-| `--max-iter` | 20 | Increase for complex tasks |
+| `--max-iter` | 10 | Increase up to 20 for complex tasks |
 | `--session-key` | — | Your session key; used to deliver result |
 | `--channel` | telegram | Delivery channel for result |
 
