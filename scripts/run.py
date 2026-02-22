@@ -113,19 +113,17 @@ def request_user_input(
     default_response: str = "",   # returned on timeout (empty = proceed as-is)
 ) -> str:
     """
-    Pause the run, send a checkpoint to J's session as a proper agent turn, then poll
-    for the user's response.
+    Pause the run, send a checkpoint to the calling session, then poll for the user's reply.
 
-    Routing mechanism (no standing config required):
-      - Sends a proper agent message (not --deliver) to J's session containing:
-          (a) the user-facing checkpoint content
-          (b) explicit routing instruction: write reply to workspace/user-input.md
-      - J processes the message, presents it to the user, and has the routing
-        instruction fresh in context when the user replies
-      - J writes the user's reply to user-input.md
-      - We poll that file every 5s
+    Notification strategy (two-layer):
+      1. --deliver push (always): guaranteed channel notification so the user sees the
+         checkpoint even if the agent session is idle. This is the primary notification.
+      2. Agent-turn injection (best-effort): injects a message into the agent's live
+         session containing a routing instruction so the agent writes the user's reply
+         to user-input.md automatically. Falls back gracefully if the turn fails.
 
-    Falls back to --deliver if the agent call fails (heartbeat bridge as safety net).
+    The orchestrator polls user-input.md every 5s. The pending-input.json marker acts
+    as a safety net for heartbeat-based routing when the agent turn is missed.
     """
     response_file  = workspace / "user-input.md"
     pending_marker = workspace / "pending-input.json"
@@ -143,7 +141,14 @@ def request_user_input(
     }
     write_file(pending_marker, json.dumps(marker, indent=2))
 
-    # Build the message to J — user-facing content + self-contained routing instruction
+    if not session_key:
+        log("No session key — cannot send checkpoint; proceeding with default")
+        return default_response
+
+    # ── Layer 1: --deliver push (always, guaranteed notification) ──────────────
+    notify(session_key, message, channel)
+
+    # ── Layer 2: agent-turn injection (best-effort, for routing context) ───────
     agent_msg = (
         f"[checkmate {kind}]\n\n"
         f"{message}\n\n"
@@ -156,12 +161,6 @@ def request_user_input(
         f"The checkmate orchestrator polls that file every 5 seconds. "
         f"Do this before anything else in your reply turn."
     )
-
-    if not session_key:
-        log("No session key — cannot send checkpoint; proceeding with default")
-        return default_response
-
-    # Send as a proper agent turn so routing instruction lands in J's live context
     cmd = [
         "openclaw", "agent",
         "--session-id", session_key,
@@ -171,13 +170,11 @@ def request_user_input(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
-            log(f"WARNING: agent turn failed (rc={result.returncode}) — falling back to --deliver")
-            notify(session_key, message, channel)
+            log(f"agent-turn injection failed (rc={result.returncode}) — direct notify already sent")
         else:
-            log(f"⏸  checkpoint sent to J's session ({kind}) — J will present to user and route reply")
+            log(f"⏸  agent-turn routing injection sent ({kind})")
     except Exception as e:
-        log(f"WARNING: checkpoint send failed ({e}) — falling back to --deliver")
-        notify(session_key, message, channel)
+        log(f"agent-turn injection failed ({e}) — direct notify already sent")
 
     log(f"polling for user reply (every 5s, up to {timeout_min} min)...")
     polls = timeout_min * 12  # every 5s
