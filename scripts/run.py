@@ -45,11 +45,15 @@ def save_state(workspace: Path, state: dict):
 
 # ── LLM interface ─────────────────────────────────────────────────────────────
 
-def call_agent(prompt: str, session_id: str, timeout_s: int = 3600) -> str:
+RETRYABLE_ERRORS = ("cooldown", "rate limit", "timed out", "FailoverError", "503", "529")
+
+def call_agent(prompt: str, session_id: str, timeout_s: int = 3600,
+               max_retries: int = 5, base_backoff: int = 60) -> str:
     """
     Spawn an agent session via the OpenClaw gateway (openclaw agent CLI).
     Each session gets the full agent runtime: all tools, all skills, OAuth auth.
     No direct Anthropic API calls — routes through the gateway like any sub-agent.
+    Retries with exponential backoff on rate limit / cooldown errors.
     """
     cmd = [
         "openclaw", "agent",
@@ -58,14 +62,24 @@ def call_agent(prompt: str, session_id: str, timeout_s: int = 3600) -> str:
         "--timeout", str(timeout_s),
         "--json",
     ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 30)
-        if result.returncode != 0:
-            raise RuntimeError(f"openclaw agent exited {result.returncode}: {result.stderr[:200]}")
-        data = json.loads(result.stdout)
-        return data["result"]["payloads"][0]["text"]
-    except (KeyError, IndexError) as e:
-        raise RuntimeError(f"Unexpected response shape: {result.stdout[:200]}") from e
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 30)
+            if result.returncode != 0:
+                err = result.stderr + result.stdout
+                if any(e in err for e in RETRYABLE_ERRORS):
+                    wait = base_backoff * (2 ** (attempt - 1))
+                    log(f"rate limit/cooldown (attempt {attempt}/{max_retries}) — waiting {wait}s")
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"openclaw agent exited {result.returncode}: {result.stderr[:300]}")
+            data = json.loads(result.stdout)
+            return data["result"]["payloads"][0]["text"]
+        except (KeyError, IndexError) as e:
+            raise RuntimeError(f"Unexpected response shape: {result.stdout[:200]}") from e
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Agent subprocess timed out after {timeout_s + 30}s")
+    raise RuntimeError(f"call_agent failed after {max_retries} retries (persistent rate limit)")
 
 
 def notify(session_key: str, message: str, channel: str):
