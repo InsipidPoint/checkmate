@@ -45,16 +45,21 @@ def save_state(workspace: Path, state: dict):
 
 # ── LLM interface ─────────────────────────────────────────────────────────────
 
-def call_llm(prompt: str, session_id: str) -> str:
-    """Single-turn LLM call via openclaw agent CLI. Returns reply text."""
+def call_agent(prompt: str, session_id: str, timeout_s: int = 3600) -> str:
+    """
+    Spawn an agent session via the OpenClaw gateway (openclaw agent CLI).
+    Each session gets the full agent runtime: all tools, all skills, OAuth auth.
+    No direct Anthropic API calls — routes through the gateway like any sub-agent.
+    """
     cmd = [
         "openclaw", "agent",
         "--session-id", session_id,
         "--message", prompt,
+        "--timeout", str(timeout_s),
         "--json",
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 30)
         if result.returncode != 0:
             raise RuntimeError(f"openclaw agent exited {result.returncode}: {result.stderr[:200]}")
         data = json.loads(result.stdout)
@@ -94,14 +99,14 @@ def run_intake(workspace: Path, task: str) -> str:
     prompt = f"{template}\n\n---\n\n## Task\n\n{task}"
 
     log("intake: generating criteria...")
-    reply = call_llm(prompt, f"checkmate-intake-{int(time.time())}")
+    reply = call_agent(prompt, f"checkmate-intake-{int(time.time())}")
     write_file(criteria_path, reply)
     log(f"intake: wrote criteria.md ({len(reply)} chars)")
     return reply
 
 
 def run_worker(workspace: Path, task: str, criteria: str, feedback: str,
-               iteration: int, max_iter: int) -> str:
+               iteration: int, max_iter: int, worker_timeout: int = 3600) -> str:
     iter_dir = workspace / f"iter-{iteration:02d}"
     iter_dir.mkdir(parents=True, exist_ok=True)
     output_path = iter_dir / "output.md"
@@ -121,15 +126,15 @@ def run_worker(workspace: Path, task: str, criteria: str, feedback: str,
         .replace("{{OUTPUT_PATH}}", str(output_path))
     )
 
-    log(f"iter {iteration}/{max_iter}: calling worker...")
-    reply = call_llm(prompt, f"checkmate-worker-{iteration}-{int(time.time())}")
+    log(f"iter {iteration}/{max_iter}: calling worker (timeout={worker_timeout}s)...")
+    reply = call_agent(prompt, f"checkmate-worker-{iteration}-{int(time.time())}", timeout_s=worker_timeout)
     write_file(output_path, reply)
     log(f"iter {iteration}: worker done ({len(reply)} chars)")
     return reply
 
 
 def run_judge(workspace: Path, criteria: str, output: str,
-              iteration: int, max_iter: int) -> tuple[str, bool]:
+              iteration: int, max_iter: int, judge_timeout: int = 300) -> tuple[str, bool]:
     iter_dir = workspace / f"iter-{iteration:02d}"
     verdict_path = iter_dir / "verdict.md"
 
@@ -141,8 +146,8 @@ def run_judge(workspace: Path, criteria: str, output: str,
         f"## Context\n\nThis is iteration {iteration} of {max_iter}."
     )
 
-    log(f"iter {iteration}: running judge...")
-    reply = call_llm(prompt, f"checkmate-judge-{iteration}-{int(time.time())}")
+    log(f"iter {iteration}: running judge (timeout={judge_timeout}s)...")
+    reply = call_agent(prompt, f"checkmate-judge-{iteration}-{int(time.time())}", timeout_s=judge_timeout)
     write_file(verdict_path, reply)
 
     is_pass = bool(re.search(r"\*\*Result:\*\*\s*PASS", reply, re.IGNORECASE))
@@ -176,8 +181,10 @@ def main():
     parser.add_argument("--workspace", required=True, help="Workspace directory path")
     parser.add_argument("--task",        default="",       help="Task text (or read from workspace/task.md)")
     parser.add_argument("--max-iter",    type=int, default=20)
-    parser.add_argument("--session-key", default="",       help="Main session key for result delivery")
-    parser.add_argument("--channel",     default="telegram")
+    parser.add_argument("--session-key",    default="",       help="Main session key for result delivery")
+    parser.add_argument("--channel",        default="telegram")
+    parser.add_argument("--worker-timeout", type=int, default=3600, help="Seconds per worker turn (default: 3600)")
+    parser.add_argument("--judge-timeout",  type=int, default=300,  help="Seconds per judge turn (default: 300)")
     args = parser.parse_args()
 
     workspace = Path(args.workspace)
@@ -210,14 +217,16 @@ def main():
         save_state(workspace, {"iteration": iteration, "status": "running"})
 
         # Worker
-        output = run_worker(workspace, task, criteria, feedback, iteration, max_iter)
+        output = run_worker(workspace, task, criteria, feedback, iteration, max_iter,
+                            worker_timeout=args.worker_timeout)
 
         if "[BLOCKED]" in output:
             log(f"worker BLOCKED — skipping judge this iteration")
             gaps = f"Worker was blocked:\n{output}"
         else:
             # Judge
-            verdict, is_pass = run_judge(workspace, criteria, output, iteration, max_iter)
+            verdict, is_pass = run_judge(workspace, criteria, output, iteration, max_iter,
+                                         judge_timeout=args.judge_timeout)
 
             if is_pass:
                 write_file(workspace / "final-output.md", output)

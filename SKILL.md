@@ -11,16 +11,22 @@ Nothing leaves until it passes.
 ## Architecture
 
 ```
-scripts/run.py (real while loop)
-  ├─ Intake:  call_llm(intake prompt + task)     → criteria.md    [once]
+scripts/run.py  (deterministic Python while loop — the orchestrator)
+  ├─ Intake:  spawn agent session → criteria.md          [once]
   └─ Loop [up to max_iter]:
-       ├─ Worker: call_llm(worker prompt + criteria + feedback) → iter-N/output.md
-       ├─ Judge:  call_llm(judge prompt + criteria + output)   → iter-N/verdict.md
+       ├─ Worker: spawn agent session → iter-N/output.md
+       │          (full runtime: exec, web_search, all skills, OAuth auth)
+       ├─ Judge:  spawn agent session → iter-N/verdict.md
        ├─ PASS?  → write final-output.md, notify user, exit
        └─ FAIL?  → extract gaps, append to feedback.md, next iteration
 ```
 
-Each `call_llm` runs `openclaw agent --session-id <isolated-id> --message <prompt> --json`.
+Each agent session is spawned via:
+```bash
+openclaw agent --session-id <isolated-id> --message <prompt> --timeout <N> --json
+```
+Routes through the gateway WebSocket using existing OAuth — no separate API key.
+Workers get full agent runtime: exec, web_search, web_fetch, all skills, sessions_spawn.
 
 ## Your Job (main agent)
 

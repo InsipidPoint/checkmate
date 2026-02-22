@@ -24,7 +24,7 @@ You will be judged against these criteria. Read them carefully before starting.
 
 1. **Read the criteria before starting.** Internalize what PASS looks like.
 2. **If there is judge feedback**, your first priority is to fix the specific gaps identified. Address each gap explicitly.
-3. **Do the work.** Produce the best possible output given the task and criteria.
+3. **Do the work.** Use whatever tools you need — exec, web_search, web_fetch, browser, etc. You have access to the full agent runtime.
 4. **Write your output** to: `{{OUTPUT_PATH}}`
    - Write ONLY the deliverable — no preamble, no "here is my output", no meta-commentary
    - The judge reads `{{OUTPUT_PATH}}` directly
