@@ -1,6 +1,6 @@
 ---
 name: checkmate
-description: "Focus your agent on a long-running task and keep iterating until your satisfaction criteria are met — not just a best-effort attempt. Use when you want to lock your agent into a quality loop: it converts your goal into machine-checkable criteria, spins up a worker, judges the output, feeds back gaps, and repeats until PASS or you call it done. Good for tasks where correctness matters: code that must pass tests, docs that must hit a standard, research that must be thorough, anything where 'good enough on first try' isn't acceptable. Triggers on 'checkmate: TASK', 'keep going until it passes', 'don't stop until done', 'quality loop', 'iterate until satisfied', 'judge and retry'."
+description: "Iterative task loop with a judge: converts your goal into machine-checkable criteria, runs a worker, judges output, feeds back gaps, repeats until PASS. Use when correctness matters. Triggers: 'checkmate: TASK', 'keep going until done', 'quality loop'."
 ---
 
 # Checkmate
