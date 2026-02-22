@@ -91,7 +91,7 @@ cat <workspace-parent>/checkmate-*/pending-input.json 2>/dev/null
 echo "USER REPLY HERE" > /path/to/workspace/user-input.md
 ```
 
-The orchestrator polls for this file every 30 seconds. Once written, it resumes automatically and deletes the file.
+The orchestrator polls for this file every 5 seconds. Once written, it resumes automatically and deletes the file.
 
 **Accepted replies at each gate:**
 

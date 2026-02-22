@@ -85,13 +85,13 @@ def call_agent(prompt: str, session_id: str, timeout_s: int = 3600,
 def notify(recipient: str, message: str, channel: str):
     """
     Deliver a plain message directly to the user via `openclaw message send`.
-    recipient is the channel-specific target (e.g. Telegram chat ID, phone number in E.164).
+    recipient is the channel-specific target (e.g. channel user ID, phone number in E.164).
     Uses direct channel delivery — no agent runtime involved.
     """
     if not recipient:
         log("No recipient — result written to workspace/final-output.md only")
         return
-    # Telegram limit is 4096 chars; truncate with a note if needed
+    # Most channels have a ~4096 char limit; truncate with a note if needed
     MAX_MSG = 3800
     if len(message) > MAX_MSG:
         message = message[:MAX_MSG] + f"\n\n…_(truncated — see workspace for full content)_"
@@ -499,7 +499,7 @@ def main():
     parser.add_argument("--workspace",        required=True, help="Workspace directory path")
     parser.add_argument("--task",             default="",    help="Task text (or read from workspace/task.md)")
     parser.add_argument("--max-iter",         type=int, default=10)
-    parser.add_argument("--recipient",      default="",    help="Channel recipient ID (e.g. Telegram user ID, phone number in E.164)")
+    parser.add_argument("--recipient",      default="",    help="Channel recipient ID (e.g. channel user ID or phone number in E.164)")
     parser.add_argument("--channel",          default="telegram")
     parser.add_argument("--worker-timeout",   type=int, default=3600, help="Seconds per worker turn (default: 3600)")
     parser.add_argument("--judge-timeout",    type=int, default=300,  help="Seconds per judge turn (default: 300)")

@@ -42,7 +42,7 @@ scripts/run.py  (deterministic Python while loop — the real orchestrator)
        ├─ Worker: spawn agent session → writes iter-N/output.md
        │          (full runtime: exec, web_search, all skills, OAuth auth)
        ├─ Judge:  spawn agent session → writes iter-N/verdict.md
-       ├─ PASS?  → write final-output.md, notify user via --session-key, exit
+       ├─ PASS?  → write final-output.md, notify user via --recipient, exit
        └─ FAIL?  → extract gap summary → ⏸ CHECKPOINT (interactive): show score + gaps
                      continue?    → next iteration (with judge gaps)
                      redirect: X  → next iteration (with user direction appended)
@@ -56,8 +56,8 @@ scripts/run.py  (deterministic Python while loop — the real orchestrator)
 
 When the orchestrator needs user input, it:
 1. Writes `workspace/pending-input.json` (kind + workspace path + channel)
-2. Sends a notification via `--session-key` and `--channel`
-3. Polls `workspace/user-input.md` every 30 seconds (up to `--checkpoint-timeout` minutes)
+2. Sends a notification via `--recipient` and `--channel`
+3. Polls `workspace/user-input.md` every 5 seconds (up to `--checkpoint-timeout` minutes)
 
 The main agent acts as the bridge: when `pending-input.json` exists and the user replies, the agent writes their response to `user-input.md`. The orchestrator picks it up automatically and resumes.
 
@@ -106,16 +106,13 @@ git clone https://github.com/InsipidPoint/checkmate checkmate
 
 ## Quick Start
 
-### 1. Get your session key
+### 1. Get your recipient ID
 
-```python
-session_status()  # note the sessionKey field
-```
-
-Or from the CLI:
+Your recipient ID is the channel-specific identifier for your account — e.g. your Telegram user ID, WhatsApp phone number in E.164, or Discord user ID. This is what `--recipient` and `--channel` route notifications to.
 
 ```bash
-openclaw sessions list --limit 1
+# Example: Telegram user ID
+openclaw sessions list --limit 1  # shows chat_id in session key
 ```
 
 ### 2. Create a workspace
@@ -134,7 +131,7 @@ python3 <skill-path>/scripts/run.py \
   --workspace "$WORKSPACE" \
   --task "Your task description" \
   --max-iter 10 \
-  --session-key YOUR_SESSION_KEY \
+  --recipient YOUR_RECIPIENT_ID \
   --channel YOUR_CHANNEL
 ```
 
@@ -145,7 +142,7 @@ nohup python3 <skill-path>/scripts/run.py \
   --workspace "$WORKSPACE" \
   --task "Your task description" \
   --max-iter 20 \
-  --session-key YOUR_SESSION_KEY \
+  --recipient YOUR_RECIPIENT_ID \
   --channel YOUR_CHANNEL \
   > "$WORKSPACE/run.log" 2>&1 &
 
@@ -160,7 +157,7 @@ On PASS or after max iterations, the best output is written to:
 $WORKSPACE/final-output.md
 ```
 
-You will also receive a notification on your configured channel (if `--session-key` and `--channel` are set).
+You will also receive a notification on your configured channel (if `--recipient` and `--channel` are set).
 
 ---
 
@@ -180,7 +177,7 @@ python3 scripts/run.py \
   --task "Deep analysis of NVDA vs AMD for 2026 AI infrastructure spend" \
   --max-iter 20 \
   --worker-timeout 7200 \
-  --session-key main-session-key \
+  --recipient YOUR_RECIPIENT_ID \
   --channel telegram
 ```
 
@@ -194,7 +191,7 @@ python3 scripts/run.py \
 
 **Triggered from the main agent (via checkmate skill):**
 When the user says `checkmate: <task>` or `until it passes`, the main agent:
-1. Calls `session_status` to get its session key
+1. Gets its recipient ID (channel-specific user/chat identifier)
 2. Creates a workspace via `workspace.sh`
 3. Spawns `run.py` via `exec` with `background=true`
 4. Tells the user it's running and will notify on their configured channel when done
@@ -211,8 +208,8 @@ When the user says `checkmate: <task>` or `until it passes`, the main agent:
 | `--max-iter` | `10` | Max main loop iterations (increase to 20 for complex tasks) |
 | `--worker-timeout` | `3600` | Seconds per worker agent call |
 | `--judge-timeout` | `300` | Seconds per judge agent call |
-| `--session-key` | `""` | Main session key; used to deliver result notification |
-| `--channel` | `telegram` | Delivery channel for result (`telegram`, `whatsapp`, etc.) |
+| `--recipient` | `""` | Channel recipient ID (e.g. user ID or E.164 phone number); used for checkpoint notifications and result delivery |
+| `--channel` | `""` | Delivery channel for notifications (e.g. `telegram`, `whatsapp`, `signal`) |
 | `--no-interactive` | off | Disable user checkpoints; fully autonomous batch mode |
 | `--checkpoint-timeout` | `60` | Minutes to wait for user reply at each interactive checkpoint |
 
@@ -270,7 +267,7 @@ This means you can safely re-run after a network blip, rate-limit crash, or syst
 
 In interactive mode (default), the orchestrator pauses at three gates: criteria review, pre-start confirmation, and each FAIL iteration. When paused, it writes `workspace/pending-input.json` and sends you a notification via `--channel`.
 
-The main agent acts as a bridge: when you reply to the notification, it writes your response to `workspace/user-input.md`. The orchestrator detects the file within 30 seconds and resumes.
+The main agent acts as a bridge: when you reply to the notification, it writes your response to `workspace/user-input.md`. The orchestrator detects the file within 5 seconds and resumes.
 
 **Accepted replies at each gate:**
 
@@ -286,4 +283,4 @@ To inject a response manually (e.g., after a notification was missed):
 echo "continue" > /tmp/checkmate-TIMESTAMP/user-input.md
 ```
 
-The orchestrator polls every 30 seconds and resumes automatically.
+The orchestrator polls every 5 seconds and resumes automatically.

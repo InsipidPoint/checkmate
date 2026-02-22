@@ -53,11 +53,12 @@ Resume: re-run `run.py` with same `--workspace`. Completed steps are skipped.
 
 ## Notification
 
-On completion, `run.py` calls:
+On completion (and at each interactive checkpoint), `run.py` calls:
 ```bash
-openclaw agent --session-id SESSION_KEY \
-               --message "RESULT" \
-               --deliver --channel CHANNEL
+openclaw message send \
+  --channel CHANNEL \
+  --target RECIPIENT \
+  --message "RESULT"
 ```
 
-The main agent receives the message and delivers it via the configured channel.
+`RECIPIENT` is the channel-specific target ID passed via `--recipient` (e.g. Telegram user ID, E.164 phone number). Messages are sent directly — no agent turn required.
