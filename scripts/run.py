@@ -115,15 +115,21 @@ def request_user_input(
     """
     Pause the run, send a checkpoint to the calling session, then poll for the user's reply.
 
-    Notification strategy (two-layer):
-      1. --deliver push (always): guaranteed channel notification so the user sees the
-         checkpoint even if the agent session is idle. This is the primary notification.
-      2. Agent-turn injection (best-effort): injects a message into the agent's live
-         session containing a routing instruction so the agent writes the user's reply
-         to user-input.md automatically. Falls back gracefully if the turn fails.
+    Notification strategy:
+      PRIMARY — agent-turn injection: injects a message into the agent's live session
+        containing the user-facing checkpoint AND a routing instruction. The agent
+        processes it, presents the checkpoint to the user, and already has context to
+        write the user's reply to user-input.md.
 
-    The orchestrator polls user-input.md every 5s. The pending-input.json marker acts
-    as a safety net for heartbeat-based routing when the agent turn is missed.
+      FALLBACK — --deliver push: if agent-turn fails, sends directly to the channel.
+        The fallback message embeds the same routing instruction addressed to the agent,
+        so it appears in conversation history — the agent sees it when the user replies
+        and can still route correctly.
+
+    Failures are logged loudly (not silently) so the agent is aware routing context
+    may be missing and can fall back to checking pending-input.json.
+
+    The orchestrator polls user-input.md every 5s.
     """
     response_file  = workspace / "user-input.md"
     pending_marker = workspace / "pending-input.json"
@@ -132,7 +138,7 @@ def request_user_input(
     if response_file.exists():
         response_file.unlink()
 
-    # Write marker (enables heartbeat fallback if primary bridge fails)
+    # Write marker (heartbeat safety net — agent checks this if routing context was lost)
     marker = {
         "kind": kind,
         "waiting_since": datetime.now(timezone.utc).isoformat(),
@@ -145,21 +151,18 @@ def request_user_input(
         log("No session key — cannot send checkpoint; proceeding with default")
         return default_response
 
-    # ── Layer 1: --deliver push (always, guaranteed notification) ──────────────
-    notify(session_key, message, channel)
+    routing_instruction = (
+        f"⚙️ **Routing instruction:** When the user replies, immediately write their "
+        f"exact reply to `{workspace}/user-input.md` before anything else.\n"
+        f"The checkmate orchestrator polls that file every 5 seconds."
+    )
 
-    # ── Layer 2: agent-turn injection (best-effort, for routing context) ───────
+    # ── Primary: agent-turn injection (routing context lands in agent's live session) ──
     agent_msg = (
         f"[checkmate {kind}]\n\n"
         f"{message}\n\n"
         f"---\n"
-        f"⚙️ **Routing instruction (act on this):** When the user replies to you, "
-        f"immediately write their exact reply to:\n"
-        f"`{workspace}/user-input.md`\n\n"
-        f"Example:\n"
-        f"```bash\necho 'their reply' > {workspace}/user-input.md\n```\n\n"
-        f"The checkmate orchestrator polls that file every 5 seconds. "
-        f"Do this before anything else in your reply turn."
+        f"{routing_instruction}"
     )
     cmd = [
         "openclaw", "agent",
@@ -167,14 +170,32 @@ def request_user_input(
         "--message", agent_msg,
         "--json",
     ]
+    agent_turn_ok = False
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            log(f"agent-turn injection failed (rc={result.returncode}) — direct notify already sent")
+        if result.returncode == 0:
+            agent_turn_ok = True
+            log(f"⏸  checkpoint sent via agent-turn ({kind})")
         else:
-            log(f"⏸  agent-turn routing injection sent ({kind})")
+            log(
+                f"⚠️  CHECKPOINT DELIVERY FAILED: agent-turn returned rc={result.returncode} "
+                f"— falling back to --deliver. Routing context may be missing from agent session."
+            )
     except Exception as e:
-        log(f"agent-turn injection failed ({e}) — direct notify already sent")
+        log(
+            f"⚠️  CHECKPOINT DELIVERY FAILED: agent-turn exception ({e}) "
+            f"— falling back to --deliver. Routing context may be missing from agent session."
+        )
+
+    # ── Fallback: --deliver push (embeds routing note so it lands in conversation history) ──
+    if not agent_turn_ok:
+        fallback_msg = (
+            f"{message}\n\n"
+            f"---\n"
+            f"_(checkmate fallback notification — agent-turn delivery failed)_\n\n"
+            f"{routing_instruction}"
+        )
+        notify(session_key, fallback_msg, channel)
 
     log(f"polling for user reply (every 5s, up to {timeout_min} min)...")
     polls = timeout_min * 12  # every 5s
