@@ -423,10 +423,29 @@ def run_worker(workspace: Path, task: str, criteria: str, feedback: str,
     )
 
     log(f"iter {iteration}/{max_iter}: calling worker (timeout={worker_timeout}s)...")
-    reply = call_agent(prompt, f"checkmate-worker-{iteration}-{int(time.time())}", timeout_s=worker_timeout)
-    write_file(output_path, reply)
-    log(f"iter {iteration}: worker done ({len(reply)} chars)")
-    return reply
+    call_agent_reply = call_agent(
+        prompt, f"checkmate-worker-{iteration}-{int(time.time())}", timeout_s=worker_timeout
+    )
+
+    # Prefer output_path if the worker wrote it (primary output mechanism per prompt).
+    # call_agent() may return early planning text or a partial response — the file
+    # written by the worker itself is the authoritative output.
+    # Poll briefly in case the worker session is still flushing writes.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if output_path.exists() and output_path.stat().st_size > 0:
+            mtime = output_path.stat().st_mtime
+            time.sleep(3)
+            if output_path.stat().st_mtime == mtime:  # stable (no further writes)
+                content = output_path.read_text()
+                log(f"iter {iteration}: worker wrote output.md ({len(content)} chars) — using file output")
+                return content
+        time.sleep(3)
+
+    # Fallback: worker did not write output_path — use call_agent's return value
+    log(f"WARNING: iter {iteration}: worker did not write output.md — falling back to session reply ({len(call_agent_reply)} chars)")
+    write_file(output_path, call_agent_reply)
+    return call_agent_reply
 
 
 def run_judge(workspace: Path, criteria: str, output: str,
