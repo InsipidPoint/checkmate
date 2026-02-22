@@ -1,6 +1,6 @@
 ---
 name: checkmate
-description: "Iterative task loop with a judge: converts a goal into machine-checkable criteria, runs a worker, judges output, feeds back gaps, repeats until PASS. For tasks where correctness matters and best-effort isn't enough. Say 'checkmate: TASK' to trigger."
+description: "Enforces task completion: turns your goal into pass/fail criteria, runs a worker, judges the output, feeds back what's missing, and loops until every criterion passes. Nothing ships until it's truly done. Trigger: 'checkmate: TASK'"
 ---
 
 # Checkmate
