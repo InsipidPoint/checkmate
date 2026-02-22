@@ -56,7 +56,7 @@ Workers get full agent runtime: exec, web_search, web_fetch, all skills, session
 
 When checkmate is triggered:
 
-1. **Get recipient ID**: your channel-specific identifier (e.g. Telegram user ID, E.164 phone number)
+1. **Get recipient ID**: your channel-specific identifier (e.g. your channel's user ID, phone number in E.164)
 2. **Create workspace**:
    ```bash
    bash <skill-path>/scripts/workspace.sh /tmp "TASK"
@@ -109,7 +109,7 @@ The orchestrator polls for this file every 30 seconds. Once written, it resumes 
 | `--max-iter` | 10 | Main loop iterations (increase to 20 for complex tasks) |
 | `--worker-timeout` | 3600s | Per worker session |
 | `--judge-timeout` | 300s | Per judge session |
-| `--recipient` | — | Channel recipient ID (e.g. Telegram user ID, phone number in E.164); used to deliver checkpoints and result |
+| `--recipient` | — | Channel recipient ID (e.g. your channel's user ID, phone number in E.164); used to deliver checkpoints and result |
 | `--channel` | — | Delivery channel for notifications (e.g. `telegram`, `whatsapp`, `signal`) |
 | `--no-interactive` | off | Disable user checkpoints (batch mode) |
 | `--checkpoint-timeout` | 60 | Minutes to wait for user reply at each checkpoint |

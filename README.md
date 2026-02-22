@@ -197,7 +197,7 @@ When the user says `checkmate: <task>` or `until it passes`, the main agent:
 1. Calls `session_status` to get its session key
 2. Creates a workspace via `workspace.sh`
 3. Spawns `run.py` via `exec` with `background=true`
-4. Tells the user it's running and will notify on Telegram when done
+4. Tells the user it's running and will notify on their configured channel when done
 
 ---
 
