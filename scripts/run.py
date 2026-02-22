@@ -144,7 +144,7 @@ def request_user_input(
     notify(session_key, message, channel)
     log(f"⏸  paused ({kind}) — waiting for user reply (up to {timeout_min} min)...")
 
-    polls = timeout_min * 2  # every 30s
+    polls = timeout_min * 12  # every 5s
     for _ in range(polls):
         if response_file.exists():
             response = response_file.read_text().strip()
@@ -152,7 +152,7 @@ def request_user_input(
             input_marker.unlink(missing_ok=True)
             log(f"▶  user replied ({len(response)} chars) — resuming")
             return response
-        time.sleep(30)
+        time.sleep(5)
 
     log(f"user input timeout after {timeout_min} min — proceeding with default: '{default_response or 'proceed'}'")
     input_marker.unlink(missing_ok=True)
