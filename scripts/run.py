@@ -89,20 +89,65 @@ def notify(session_key: str, message: str, channel: str):
 
 # ── Stages ────────────────────────────────────────────────────────────────────
 
-def run_intake(workspace: Path, task: str) -> str:
+def run_intake_draft(task: str, feedback: str, iteration: int) -> str:
+    """Generate a criteria draft, optionally with refinement feedback."""
+    template = read_file(SKILL_DIR / "prompts" / "intake.md")
+    prompt = f"{template}\n\n---\n\n## Task\n\n{task}"
+    if feedback.strip():
+        prompt += f"\n\n## Refinement Feedback (fix these issues)\n\n{feedback}"
+    return call_agent(prompt, f"checkmate-intake-draft-{iteration}-{int(time.time())}", timeout_s=120)
+
+
+def run_criteria_judge(task: str, criteria: str, iteration: int) -> tuple[str, bool]:
+    """Judge whether the criteria themselves are good enough."""
+    template = read_file(SKILL_DIR / "prompts" / "criteria-judge.md")
+    prompt = (
+        f"{template}\n\n---\n\n"
+        f"## Original Task\n\n{task}\n\n"
+        f"## Proposed Criteria (intake iteration {iteration})\n\n{criteria}"
+    )
+    reply = call_agent(prompt, f"checkmate-criteria-judge-{iteration}-{int(time.time())}", timeout_s=120)
+    approved = bool(re.search(r"\*\*Result:\*\*\s*APPROVED", reply, re.IGNORECASE))
+    return reply, approved
+
+
+def extract_criteria_feedback(verdict: str) -> str:
+    """Extract suggested fixes from a criteria judge verdict."""
+    m = re.search(r"## Suggested Fixes\n(.*?)(?=\n## |\Z)", verdict, re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+
+def run_intake(workspace: Path, task: str, max_intake_iter: int = 5) -> str:
     criteria_path = workspace / "criteria.md"
     if criteria_path.exists():
         log("intake: criteria.md already exists, skipping")
         return criteria_path.read_text()
 
-    template = read_file(SKILL_DIR / "prompts" / "intake.md")
-    prompt = f"{template}\n\n---\n\n## Task\n\n{task}"
+    feedback = ""
+    criteria = ""
 
-    log("intake: generating criteria...")
-    reply = call_agent(prompt, f"checkmate-intake-{int(time.time())}")
-    write_file(criteria_path, reply)
-    log(f"intake: wrote criteria.md ({len(reply)} chars)")
-    return reply
+    for i in range(1, max_intake_iter + 1):
+        log(f"intake: iteration {i}/{max_intake_iter} — drafting criteria...")
+        criteria = run_intake_draft(task, feedback, i)
+
+        intake_dir = workspace / f"intake-{i:02d}"
+        intake_dir.mkdir(parents=True, exist_ok=True)
+        write_file(intake_dir / "criteria-draft.md", criteria)
+
+        log(f"intake: judging criteria quality (iter {i})...")
+        verdict, approved = run_criteria_judge(task, criteria, i)
+        write_file(intake_dir / "criteria-verdict.md", verdict)
+
+        if approved:
+            log(f"intake: criteria APPROVED on iteration {i}")
+            break
+
+        feedback = extract_criteria_feedback(verdict)
+        log(f"intake: criteria NEEDS_WORK — refining (iter {i})")
+
+    write_file(criteria_path, criteria)
+    log(f"intake: locked criteria.md ({len(criteria)} chars)")
+    return criteria
 
 
 def run_worker(workspace: Path, task: str, criteria: str, feedback: str,
@@ -183,8 +228,9 @@ def main():
     parser.add_argument("--max-iter",    type=int, default=10)
     parser.add_argument("--session-key",    default="",       help="Main session key for result delivery")
     parser.add_argument("--channel",        default="telegram")
-    parser.add_argument("--worker-timeout", type=int, default=3600, help="Seconds per worker turn (default: 3600)")
-    parser.add_argument("--judge-timeout",  type=int, default=300,  help="Seconds per judge turn (default: 300)")
+    parser.add_argument("--worker-timeout",   type=int, default=3600, help="Seconds per worker turn (default: 3600)")
+    parser.add_argument("--judge-timeout",    type=int, default=300,  help="Seconds per judge turn (default: 300)")
+    parser.add_argument("--max-intake-iter",  type=int, default=5,    help="Max intake refinement iterations (default: 5)")
     args = parser.parse_args()
 
     workspace = Path(args.workspace)
@@ -207,7 +253,7 @@ def main():
     log(f"starting — iterations {start_iter}–{max_iter}, workspace={workspace}")
 
     # ── Intake ────────────────────────────────────────────────────────────────
-    criteria = run_intake(workspace, task)
+    criteria = run_intake(workspace, task, max_intake_iter=args.max_intake_iter)
 
     # ── Loop ──────────────────────────────────────────────────────────────────
     feedback = read_file(workspace / "feedback.md")

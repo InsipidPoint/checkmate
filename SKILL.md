@@ -12,8 +12,12 @@ Nothing leaves until it passes.
 
 ```
 scripts/run.py  (deterministic Python while loop — the orchestrator)
-  ├─ Intake:  spawn agent session → criteria.md          [once]
-  └─ Loop [up to max_iter]:
+  ├─ Intake loop [up to max_intake_iter, default 5]:
+  │    ├─ Draft criteria (intake prompt + task + refinement feedback)
+  │    ├─ Criteria-judge: are the criteria good enough?
+  │    ├─ APPROVED → lock criteria.md, proceed
+  │    └─ NEEDS_WORK → extract fixes, refine, next intake iteration
+  └─ Main loop [up to max_iter, default 10]:
        ├─ Worker: spawn agent session → iter-N/output.md
        │          (full runtime: exec, web_search, all skills, OAuth auth)
        ├─ Judge:  spawn agent session → iter-N/verdict.md
@@ -56,7 +60,10 @@ When checkmate is triggered:
 
 | Flag | Default | Notes |
 |------|---------|-------|
-| `--max-iter` | 10 | Increase up to 20 for complex tasks |
+| `--max-intake-iter` | 5 | Intake criteria refinement iterations |
+| `--max-iter` | 10 | Main loop iterations (increase to 20 for complex tasks) |
+| `--worker-timeout` | 3600s | Per worker session |
+| `--judge-timeout` | 300s | Per judge session |
 | `--session-key` | — | Your session key; used to deliver result |
 | `--channel` | telegram | Delivery channel for result |
 
@@ -80,6 +87,7 @@ If the script is interrupted, just re-run it with the same `--workspace`. It rea
 
 ## Prompts
 
-- `prompts/intake.md` — intake prompt template
-- `prompts/worker.md` — worker prompt template (variables: TASK, CRITERIA, FEEDBACK, ITERATION, MAX_ITER, OUTPUT_PATH)
-- `prompts/judge.md` — judge prompt template
+- `prompts/intake.md` — converts task → criteria draft
+- `prompts/criteria-judge.md` — evaluates criteria quality (APPROVED / NEEDS_WORK)
+- `prompts/worker.md` — worker prompt (variables: TASK, CRITERIA, FEEDBACK, ITERATION, MAX_ITER, OUTPUT_PATH)
+- `prompts/judge.md` — evaluates output against criteria (PASS / FAIL)
