@@ -106,14 +106,16 @@ git clone https://github.com/InsipidPoint/checkmate checkmate
 
 ## Quick Start
 
-### 1. Get your recipient ID
+### 1. Get your session UUID and recipient ID
 
-Your recipient ID is the channel-specific identifier for your account — e.g. your Telegram user ID, WhatsApp phone number in E.164, or Discord user ID. This is what `--recipient` and `--channel` route notifications to.
+The session UUID enables direct agent-turn injection — the preferred notification path:
 
 ```bash
-# Example: Telegram user ID
-openclaw sessions list --limit 1  # shows chat_id in session key
+openclaw gateway call sessions.list --params '{"limit":1}' --json \
+  | python3 -c "import json,sys; s=json.load(sys.stdin)['sessions'][0]; print(s['sessionId'], s['lastTo'])"
 ```
+
+This prints your `sessionId` (UUID) and `lastTo` (channel:recipient_id). Use both in the run command.
 
 ### 2. Create a workspace
 
@@ -131,6 +133,7 @@ python3 <skill-path>/scripts/run.py \
   --workspace "$WORKSPACE" \
   --task "Your task description" \
   --max-iter 10 \
+  --session-uuid YOUR_SESSION_UUID \
   --recipient YOUR_RECIPIENT_ID \
   --channel YOUR_CHANNEL
 ```
@@ -142,6 +145,7 @@ nohup python3 <skill-path>/scripts/run.py \
   --workspace "$WORKSPACE" \
   --task "Your task description" \
   --max-iter 20 \
+  --session-uuid YOUR_SESSION_UUID \
   --recipient YOUR_RECIPIENT_ID \
   --channel YOUR_CHANNEL \
   > "$WORKSPACE/run.log" 2>&1 &
@@ -177,8 +181,9 @@ python3 scripts/run.py \
   --task "Deep analysis of NVDA vs AMD for 2026 AI infrastructure spend" \
   --max-iter 20 \
   --worker-timeout 7200 \
+  --session-uuid YOUR_SESSION_UUID \
   --recipient YOUR_RECIPIENT_ID \
-  --channel telegram
+  --channel YOUR_CHANNEL
 ```
 
 **Resume an interrupted run:**
@@ -191,10 +196,10 @@ python3 scripts/run.py \
 
 **Triggered from the main agent (via checkmate skill):**
 When the user says `checkmate: <task>` or `until it passes`, the main agent:
-1. Gets its recipient ID (channel-specific user/chat identifier)
+1. Looks up its session UUID via `openclaw gateway call sessions.list`
 2. Creates a workspace via `workspace.sh`
-3. Spawns `run.py` via `exec` with `background=true`
-4. Tells the user it's running and will notify on their configured channel when done
+3. Spawns `run.py` via `exec` with `background=true`, passing `--session-uuid` and `--recipient`
+4. Tells the user it's running; checkpoints arrive as direct agent turns
 
 ---
 
@@ -208,8 +213,9 @@ When the user says `checkmate: <task>` or `until it passes`, the main agent:
 | `--max-iter` | `10` | Max main loop iterations (increase to 20 for complex tasks) |
 | `--worker-timeout` | `3600` | Seconds per worker agent call |
 | `--judge-timeout` | `300` | Seconds per judge agent call |
-| `--recipient` | `""` | Channel recipient ID (e.g. user ID or E.164 phone number); used for checkpoint notifications and result delivery |
-| `--channel` | `""` | Delivery channel for notifications (e.g. `telegram`, `whatsapp`, `signal`) |
+| `--session-uuid` | `""` | Agent session UUID (from `sessions.list`); primary notification path via direct turn injection |
+| `--recipient` | `""` | Channel recipient ID (e.g. user/chat ID or E.164 phone); fallback if injection unavailable |
+| `--channel` | `""` | Delivery channel for fallback notifications (e.g. `telegram`, `whatsapp`, `signal`) |
 | `--no-interactive` | off | Disable user checkpoints; fully autonomous batch mode |
 | `--checkpoint-timeout` | `60` | Minutes to wait for user reply at each interactive checkpoint |
 

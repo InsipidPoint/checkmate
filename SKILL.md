@@ -56,7 +56,13 @@ Workers get full agent runtime: exec, web_search, web_fetch, all skills, session
 
 When checkmate is triggered:
 
-1. **Get recipient ID**: your channel-specific identifier (e.g. your channel's user ID, phone number in E.164)
+1. **Get your session UUID** (for direct agent-turn injection):
+   ```bash
+   openclaw gateway call sessions.list --params '{"limit":1}' --json \
+     | python3 -c "import json,sys; s=json.load(sys.stdin)['sessions'][0]; print(s['sessionId'])"
+   ```
+   Also note your `--recipient` (channel user/chat ID) and `--channel` as fallback.
+
 2. **Create workspace**:
    ```bash
    bash <skill-path>/scripts/workspace.sh /tmp "TASK"
@@ -69,7 +75,8 @@ When checkmate is triggered:
      --workspace /tmp/checkmate-TIMESTAMP \
      --task "FULL TASK DESCRIPTION" \
      --max-iter 10 \
-     --recipient RECIPIENT \
+     --session-uuid YOUR_SESSION_UUID \
+     --recipient YOUR_RECIPIENT_ID \
      --channel <your-channel>
    ```
    Use `exec` with `background=true`. This runs for as long as needed.
@@ -109,8 +116,9 @@ The orchestrator polls for this file every 5 seconds. Once written, it resumes a
 | `--max-iter` | 10 | Main loop iterations (increase to 20 for complex tasks) |
 | `--worker-timeout` | 3600s | Per worker session |
 | `--judge-timeout` | 300s | Per judge session |
-| `--recipient` | — | Channel recipient ID (e.g. your channel's user ID, phone number in E.164); used to deliver checkpoints and result |
-| `--channel` | — | Delivery channel for notifications (e.g. `telegram`, `whatsapp`, `signal`) |
+| `--session-uuid` | — | Agent session UUID (from `sessions.list`); used for direct turn injection — primary notification path |
+| `--recipient` | — | Channel recipient ID (e.g. user/chat ID, E.164 phone number); fallback if injection fails |
+| `--channel` | — | Delivery channel for fallback notifications (e.g. `telegram`, `whatsapp`, `signal`) |
 | `--no-interactive` | off | Disable user checkpoints (batch mode) |
 | `--checkpoint-timeout` | 60 | Minutes to wait for user reply at each checkpoint |
 

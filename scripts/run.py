@@ -114,6 +114,33 @@ def notify(recipient: str, message: str, channel: str):
 
 # ── User input / checkpoint system ────────────────────────────────────────────
 
+def inject_agent_turn(session_uuid: str, message: str, timeout_s: int = 120) -> bool:
+    """
+    Inject a message into the agent's live session using its UUID.
+    Returns True on success, False on failure.
+    The agent processes the message in context, sees routing instructions,
+    and naturally presents the checkpoint to the user via the configured channel.
+    """
+    cmd = [
+        "openclaw", "agent",
+        "--session-id", session_uuid,
+        "--message", message,
+        "--json",
+        "--timeout", str(timeout_s),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 10)
+        if result.returncode == 0:
+            log(f"⏸  checkpoint injected into agent session (UUID={session_uuid[:8]}…)")
+            return True
+        else:
+            log(f"⚠️  agent-turn injection failed (rc={result.returncode}): {result.stderr[:150]}")
+            return False
+    except Exception as e:
+        log(f"⚠️  agent-turn injection failed ({e})")
+        return False
+
+
 def request_user_input(
     workspace: Path,
     recipient: str,
@@ -122,14 +149,20 @@ def request_user_input(
     kind: str = "input",          # "input" | "confirm" | "checkpoint"
     timeout_min: int = 60,
     default_response: str = "",   # returned on timeout (empty = proceed as-is)
+    session_uuid: str = "",       # agent session UUID for direct injection (preferred)
 ) -> str:
     """
     Pause the run, send a checkpoint to the user, then poll for their reply.
 
-    Delivery: uses --deliver to push the message directly to the user's channel.
-    The message embeds a routing instruction addressed to the agent so that when
-    the user replies, the agent sees it in conversation history and writes the
-    response to user-input.md.
+    Notification strategy (two-layer):
+      PRIMARY — agent-turn injection via session UUID: injects the checkpoint
+        message into the agent's live session. The agent has full routing context
+        and naturally presents the checkpoint + routes the reply to user-input.md.
+        Requires --session-uuid (the UUID from `openclaw gateway call sessions.list`).
+
+      FALLBACK — openclaw message send: sends directly to the channel if injection
+        fails or no session_uuid provided. The message embeds a routing instruction
+        so it appears in conversation history for the agent to act on.
 
     The orchestrator polls user-input.md every 5s.
     pending-input.json is written as a safety net for heartbeat-based routing.
@@ -150,19 +183,32 @@ def request_user_input(
     }
     write_file(pending_marker, json.dumps(marker, indent=2))
 
-    if not recipient:
-        log("No recipient — cannot send checkpoint; proceeding with default")
+    if not recipient and not session_uuid:
+        log("No recipient or session UUID — cannot send checkpoint; proceeding with default")
         return default_response
 
-    # Embed routing instruction so agent sees it in conversation history on next turn
-    full_msg = (
-        f"{message}\n\n"
-        f"---\n"
-        f"⚙️ *[Agent routing: write the user's reply to `{workspace}/user-input.md` "
-        f"before responding. The orchestrator polls that file every 5 seconds.]*"
+    routing_instruction = (
+        f"⚙️ **Routing instruction:** When the user replies, immediately write their "
+        f"exact reply to `{workspace}/user-input.md` before anything else. "
+        f"The checkmate orchestrator polls that file every 5 seconds."
     )
-    log(f"⏸  checkpoint ({kind}) — notifying {recipient} via {channel}")
-    notify(recipient, full_msg, channel)
+
+    # ── Primary: agent-turn injection (routing context lives in agent's session) ──
+    injected = False
+    if session_uuid:
+        agent_msg = f"[checkmate {kind}]\n\n{message}\n\n---\n{routing_instruction}"
+        injected = inject_agent_turn(session_uuid, agent_msg)
+
+    # ── Fallback: direct message send (routing instruction embedded in message body) ──
+    if not injected and recipient:
+        fallback_msg = (
+            f"{message}\n\n"
+            f"---\n"
+            f"_(checkmate — {'agent injection failed, ' if session_uuid else ''}direct notification)_\n\n"
+            f"{routing_instruction}"
+        )
+        log(f"⏸  checkpoint ({kind}) — sending direct message to {recipient} via {channel}")
+        notify(recipient, fallback_msg, channel)
 
     log(f"polling for user reply (every 5s, up to {timeout_min} min)...")
     polls = timeout_min * 12  # every 5s
@@ -220,7 +266,7 @@ def extract_criteria_feedback(verdict: str) -> str:
 
 def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
                recipient: str = "", channel: str = "telegram",
-               interactive: bool = True) -> str:
+               interactive: bool = True, session_uuid: str = "") -> str:
     criteria_path = workspace / "criteria.md"
     if criteria_path.exists():
         log("intake: criteria.md already exists, skipping")
@@ -258,6 +304,7 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
                 kind="confirm-criteria",
                 timeout_min=60,
                 default_response="proceed",
+                session_uuid=session_uuid,
             )
 
             if is_approval(response):
@@ -308,13 +355,13 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
 
 def confirm_prestart(workspace: Path, task: str, criteria: str,
                      recipient: str, channel: str,
-                     timeout_min: int = 60) -> bool:
+                     timeout_min: int = 60, session_uuid: str = "") -> bool:
     """
     Show the user the final task + criteria and ask for explicit go-ahead before the main loop.
     Returns True if approved, False if user cancelled.
     Interactive gate — skipped if recipient is empty.
     """
-    if not recipient:
+    if not recipient and not session_uuid:
         return True
 
     task_preview = task.strip().splitlines()[0][:200]
@@ -333,6 +380,7 @@ def confirm_prestart(workspace: Path, task: str, criteria: str,
         kind="prestart-confirm",
         timeout_min=timeout_min,
         default_response="go",
+        session_uuid=session_uuid,
     )
 
     if re.match(r"^\s*cancel\s*$", response.strip(), re.IGNORECASE):
@@ -353,13 +401,13 @@ def confirm_prestart(workspace: Path, task: str, criteria: str,
 def run_iteration_checkpoint(workspace: Path, iteration: int, max_iter: int,
                               output: str, verdict: str, gaps: str,
                               recipient: str, channel: str,
-                              timeout_min: int = 30) -> str:
+                              timeout_min: int = 30, session_uuid: str = "") -> str:
     """
     After a FAIL verdict, pause and show the user a summary.
     Returns additional feedback from user (empty = continue as-is).
-    Skipped if recipient is empty.
+    Skipped if recipient and session_uuid are both empty.
     """
-    if not recipient:
+    if not recipient and not session_uuid:
         return gaps
 
     # Extract score for the summary
@@ -384,6 +432,7 @@ def run_iteration_checkpoint(workspace: Path, iteration: int, max_iter: int,
         kind="iteration-checkpoint",
         timeout_min=timeout_min,
         default_response="continue",
+        session_uuid=session_uuid,
     )
 
     if re.match(r"^\s*stop\s*$", response.strip(), re.IGNORECASE):
@@ -499,8 +548,9 @@ def main():
     parser.add_argument("--workspace",        required=True, help="Workspace directory path")
     parser.add_argument("--task",             default="",    help="Task text (or read from workspace/task.md)")
     parser.add_argument("--max-iter",         type=int, default=10)
-    parser.add_argument("--recipient",      default="",    help="Channel recipient ID (e.g. channel user ID or phone number in E.164)")
-    parser.add_argument("--channel",          default="telegram")
+    parser.add_argument("--recipient",      default="",    help="Channel recipient ID (e.g. channel user ID or phone number in E.164); fallback notification target")
+    parser.add_argument("--session-uuid",   default="",    help="Agent session UUID for direct turn injection (from `openclaw gateway call sessions.list`); preferred over --recipient for routing")
+    parser.add_argument("--channel",          default="")
     parser.add_argument("--worker-timeout",   type=int, default=3600, help="Seconds per worker turn (default: 3600)")
     parser.add_argument("--judge-timeout",    type=int, default=300,  help="Seconds per judge turn (default: 300)")
     parser.add_argument("--max-intake-iter",  type=int, default=5,    help="Max intake refinement iterations (default: 5)")
@@ -524,11 +574,16 @@ def main():
         log(f"workspace already completed with status={state['status']} — exiting")
         return
 
-    start_iter  = state.get("iteration", 0) + 1
-    max_iter    = args.max_iter
-    recipient = args.recipient
+    start_iter    = state.get("iteration", 0) + 1
+    max_iter      = args.max_iter
+    recipient     = args.recipient
+    session_uuid  = args.session_uuid
 
     log(f"starting — iterations {start_iter}–{max_iter}, workspace={workspace}, interactive={interactive}")
+    if session_uuid:
+        log(f"agent injection: session UUID={session_uuid[:8]}… (primary notification path)")
+    elif recipient:
+        log(f"direct message: recipient={recipient} channel={args.channel} (fallback-only mode)")
 
     # ── Intake ────────────────────────────────────────────────────────────────
     criteria = run_intake(
@@ -537,6 +592,7 @@ def main():
         recipient=recipient,
         channel=args.channel,
         interactive=interactive,
+        session_uuid=session_uuid,
     )
 
     # ── Pre-start confirmation gate ────────────────────────────────────────────
@@ -547,6 +603,7 @@ def main():
             recipient=recipient,
             channel=args.channel,
             timeout_min=args.checkpoint_timeout,
+            session_uuid=session_uuid,
         )
         if not approved:
             save_state(workspace, {"iteration": 0, "status": "cancelled"})
@@ -597,13 +654,14 @@ def main():
             gaps = extract_gaps(verdict)
 
             # ── Per-iteration checkpoint (interactive) ──────────────────────
-            if interactive and recipient and iteration < max_iter:
+            if interactive and (recipient or session_uuid) and iteration < max_iter:
                 gaps = run_iteration_checkpoint(
                     workspace, iteration, max_iter,
                     output, verdict, gaps,
                     recipient=recipient,
                     channel=args.channel,
                     timeout_min=args.checkpoint_timeout,
+                    session_uuid=session_uuid,
                 )
                 if gaps == "__STOP__":
                     break
