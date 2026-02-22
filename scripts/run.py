@@ -84,21 +84,21 @@ def call_agent(prompt: str, session_id: str, timeout_s: int = 3600,
 
 def notify(recipient: str, message: str, channel: str):
     """
-    Deliver a plain message to the user via --to <recipient> --deliver --channel <channel>.
-    recipient is the channel-specific target ID (e.g. Telegram user ID, phone number).
+    Deliver a plain message directly to the user via `openclaw message send`.
+    recipient is the channel-specific target (e.g. Telegram chat ID, phone number in E.164).
+    Uses direct channel delivery — no agent runtime involved.
     """
     if not recipient:
         log("No recipient — result written to workspace/final-output.md only")
         return
     cmd = [
-        "openclaw", "agent",
-        "--to", recipient,
-        "--message", message,
-        "--deliver",
+        "openclaw", "message", "send",
         "--channel", channel,
+        "--target", recipient,
+        "--message", message,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
             log(f"📨 delivered to {recipient} via {channel}")
         else:
