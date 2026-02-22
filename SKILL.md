@@ -1,6 +1,6 @@
 ---
 name: checkmate
-description: "Iterative task completion with a judge loop. Converts a vague task into machine-checkable criteria, calls an LLM worker to produce output, judges the result, and loops with accumulated feedback until PASS or max iterations. The orchestrator is a real Python script with a deterministic while loop — LLM is used only as worker and judge. Designed for long-running tasks: supports dozens of iterations over hours. Use when: (1) a task needs quality guarantees, not just best-effort; (2) output must meet specific criteria before delivery; (3) you want autonomous iteration until something is truly done. Triggers on 'checkmate: TASK', 'until it passes', 'keep iterating until done', 'quality loop', 'judge and retry'."
+description: "Focus your agent on a long-running task and keep iterating until your satisfaction criteria are met — not just a best-effort attempt. Use when you want to lock your agent into a quality loop: it converts your goal into machine-checkable criteria, spins up a worker, judges the output, feeds back gaps, and repeats until PASS or you call it done. Good for tasks where correctness matters: code that must pass tests, docs that must hit a standard, research that must be thorough, anything where 'good enough on first try' isn't acceptable. Triggers on 'checkmate: TASK', 'keep going until it passes', 'don't stop until done', 'quality loop', 'iterate until satisfied', 'judge and retry'."
 ---
 
 # Checkmate
@@ -40,10 +40,10 @@ scripts/run.py  (deterministic Python while loop — the orchestrator)
 
 When the orchestrator needs user input, it:
 1. Writes `workspace/pending-input.json` (kind + workspace path)
-2. Sends a Telegram notification via `--session-key`
-3. Polls `workspace/user-input.md` every 30s (up to `--checkpoint-timeout` minutes)
+2. Sends a notification via `--session-key` and `--channel`
+3. Polls `workspace/user-input.md` every 5s (up to `--checkpoint-timeout` minutes)
 
-J (main session) acts as the bridge: when `pending-input.json` exists and the user replies in Telegram, J writes their response to `user-input.md`. The orchestrator picks it up automatically.
+The main agent acts as the bridge: when `pending-input.json` exists and the user replies, the agent writes their response to `user-input.md`. The orchestrator picks it up automatically.
 
 Each agent session is spawned via:
 ```bash
@@ -59,33 +59,33 @@ When checkmate is triggered:
 1. **Get session key**: call `session_status` — note the sessionKey
 2. **Create workspace**:
    ```bash
-   bash /root/clawd/skills/checkmate/scripts/workspace.sh /root/clawd/memory "TASK"
+   bash <skill-path>/scripts/workspace.sh /tmp "TASK"
    ```
    Prints the workspace path. Write the full task to `workspace/task.md` if needed.
 
 3. **Run the orchestrator** (background exec):
    ```bash
-   python3 /root/clawd/skills/checkmate/scripts/run.py \
-     --workspace /root/clawd/memory/checkmate-TIMESTAMP \
+   python3 <skill-path>/scripts/run.py \
+     --workspace /tmp/checkmate-TIMESTAMP \
      --task "FULL TASK DESCRIPTION" \
      --max-iter 10 \
      --session-key SESSION_KEY \
-     --channel telegram
+     --channel <your-channel>
    ```
    Use `exec` with `background=true`. This runs for as long as needed.
    Add `--no-interactive` for fully autonomous runs (no user checkpoints).
 
-4. **Tell the user** checkmate is running, what it's working on, and that they'll receive criteria drafts and checkpoint messages on Telegram to review and approve.
+4. **Tell the user** checkmate is running, what it's working on, and that they'll receive criteria drafts and checkpoint messages via your configured channel to review and approve.
 
 5. **Bridge user replies**: When user responds to a checkpoint message, check for `pending-input.json` and write their response to `workspace/user-input.md`.
 
 ## Bridging User Input
 
-**When a checkpoint message arrives in Telegram** (you sent the user a criteria/approval/checkpoint request), bridge their reply:
+**When a checkpoint message arrives** (the orchestrator sent the user a criteria/approval/checkpoint request), bridge their reply:
 
 ```bash
 # Find active pending input
-cat /root/clawd/memory/checkmate-*/pending-input.json 2>/dev/null
+cat <workspace-parent>/checkmate-*/pending-input.json 2>/dev/null
 
 # Route user's reply
 echo "USER REPLY HERE" > /path/to/workspace/user-input.md
@@ -110,7 +110,7 @@ The orchestrator polls for this file every 30 seconds. Once written, it resumes 
 | `--worker-timeout` | 3600s | Per worker session |
 | `--judge-timeout` | 300s | Per judge session |
 | `--session-key` | — | Your session key; used to deliver checkpoints and result |
-| `--channel` | telegram | Delivery channel |
+| `--channel` | — | Delivery channel for notifications (e.g. `telegram`, `whatsapp`, `signal`) |
 | `--no-interactive` | off | Disable user checkpoints (batch mode) |
 | `--checkpoint-timeout` | 60 | Minutes to wait for user reply at each checkpoint |
 
@@ -123,7 +123,7 @@ memory/checkmate-YYYYMMDD-HHMMSS/
 ├── feedback.md           # accumulated judge gaps + user direction
 ├── state.json            # {iteration, status} — resume support
 ├── pending-input.json    # written when waiting for user; deleted after response
-├── user-input.md         # J writes user's reply here; read + deleted by orchestrator
+├── user-input.md         # agent writes user's reply here; read + deleted by orchestrator
 ├── intake-01/
 │   ├── criteria-draft.md
 │   ├── criteria-verdict.md  (non-interactive only)

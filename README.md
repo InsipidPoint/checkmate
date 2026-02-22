@@ -98,7 +98,7 @@ This adds the skill to your OpenClaw workspace. Requires OpenClaw to be running.
 Manual install (clone into your skills directory):
 
 ```bash
-cd /root/clawd/skills
+cd <your-skills-dir>
 git clone https://github.com/InsipidPoint/checkmate checkmate
 ```
 
@@ -121,30 +121,32 @@ openclaw sessions list --limit 1
 ### 2. Create a workspace
 
 ```bash
-WORKSPACE=$(bash /root/clawd/skills/checkmate/scripts/workspace.sh /root/clawd/memory "Your task description")
+WORKSPACE=$(bash <skill-path>/scripts/workspace.sh /tmp "Your task description")
 echo "Workspace: $WORKSPACE"
 ```
+
+Replace `<skill-path>` with the path to your checkmate skill directory.
 
 ### 3. Run the orchestrator
 
 ```bash
-python3 /root/clawd/skills/checkmate/scripts/run.py \
+python3 <skill-path>/scripts/run.py \
   --workspace "$WORKSPACE" \
   --task "Your task description" \
   --max-iter 10 \
   --session-key YOUR_SESSION_KEY \
-  --channel telegram
+  --channel YOUR_CHANNEL
 ```
 
 Run in background for long tasks:
 
 ```bash
-nohup python3 /root/clawd/skills/checkmate/scripts/run.py \
+nohup python3 <skill-path>/scripts/run.py \
   --workspace "$WORKSPACE" \
   --task "Your task description" \
   --max-iter 20 \
   --session-key YOUR_SESSION_KEY \
-  --channel telegram \
+  --channel YOUR_CHANNEL \
   > "$WORKSPACE/run.log" 2>&1 &
 
 echo "Running as PID $! — tail $WORKSPACE/run.log"
@@ -158,7 +160,7 @@ On PASS or after max iterations, the best output is written to:
 $WORKSPACE/final-output.md
 ```
 
-You will also receive a Telegram notification (if `--session-key` and `--channel` are set).
+You will also receive a notification on your configured channel (if `--session-key` and `--channel` are set).
 
 ---
 
@@ -167,14 +169,14 @@ You will also receive a Telegram notification (if `--session-key` and `--channel
 **Basic usage:**
 ```bash
 python3 scripts/run.py \
-  --workspace /root/clawd/memory/checkmate-20260222-120000 \
+  --workspace /tmp/checkmate-20260222-120000 \
   --task "Write a README for the checkmate skill"
 ```
 
 **Long-running research task (20 iterations, 2h worker timeout):**
 ```bash
 python3 scripts/run.py \
-  --workspace /root/clawd/memory/checkmate-20260222-120000 \
+  --workspace /tmp/checkmate-20260222-120000 \
   --task "Deep analysis of NVDA vs AMD for 2026 AI infrastructure spend" \
   --max-iter 20 \
   --worker-timeout 7200 \
@@ -186,7 +188,7 @@ python3 scripts/run.py \
 ```bash
 # Just re-run with the same --workspace — it picks up from state.json
 python3 scripts/run.py \
-  --workspace /root/clawd/memory/checkmate-20260222-120000 \
+  --workspace /tmp/checkmate-20260222-120000 \
   --task "same task text"
 ```
 
@@ -219,7 +221,7 @@ When the user says `checkmate: <task>` or `until it passes`, the main agent:
 ## Workspace Layout
 
 ```
-/root/clawd/memory/checkmate-YYYYMMDD-HHMMSS/
+<workspace>/checkmate-YYYYMMDD-HHMMSS/
 ├── task.md                  # Original task description
 ├── criteria.md              # Locked acceptance criteria (written by intake)
 ├── feedback.md              # Accumulated judge gap summaries
@@ -252,7 +254,7 @@ Checkmate is designed to survive interruptions. If `run.py` is killed (crash, ti
 
 ```bash
 python3 scripts/run.py \
-  --workspace /root/clawd/memory/checkmate-20260222-120000 \
+  --workspace /tmp/checkmate-20260222-120000 \
   --task "original task"
 ```
 
@@ -281,7 +283,7 @@ The main agent acts as a bridge: when you reply to the notification, it writes y
 To inject a response manually (e.g., after a notification was missed):
 
 ```bash
-echo "continue" > /root/clawd/memory/checkmate-TIMESTAMP/user-input.md
+echo "continue" > /tmp/checkmate-TIMESTAMP/user-input.md
 ```
 
 The orchestrator polls every 30 seconds and resumes automatically.

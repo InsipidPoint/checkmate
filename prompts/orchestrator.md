@@ -57,7 +57,7 @@ On completion, `run.py` calls:
 ```bash
 openclaw agent --session-id SESSION_KEY \
                --message "RESULT" \
-               --deliver --channel telegram
+               --deliver --channel CHANNEL
 ```
 
-The main agent receives the message, processes it, and forwards to Telegram.
+The main agent receives the message and delivers it via the configured channel.
