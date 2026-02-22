@@ -69,7 +69,7 @@ def call_agent(prompt: str, session_id: str, timeout_s: int = 3600) -> str:
 
 
 def notify(session_key: str, message: str, channel: str):
-    """Deliver checkmate result back to the user via the main session."""
+    """Deliver a message to the user via the main session."""
     if not session_key:
         log("No session key — result written to workspace/final-output.md")
         return
@@ -82,9 +82,44 @@ def notify(session_key: str, message: str, channel: str):
     ]
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        log(f"Delivered result to session {session_key}")
+        log(f"Delivered message to session {session_key}")
     except Exception as e:
-        log(f"Notification failed ({e}) — result in workspace/final-output.md")
+        log(f"Notification failed ({e})")
+
+
+def request_clarification(workspace: Path, session_key: str, questions: str, channel: str) -> str:
+    """
+    Pause the run, ask the user clarifying questions, wait for response (up to 30 min).
+    Returns the clarification text, or empty string if timed out.
+    """
+    clarification_path = workspace / "pending-clarification.md"
+    response_path      = workspace / "clarification-response.md"
+
+    write_file(clarification_path, questions)
+
+    msg = (
+        f"[checkmate: clarification needed]\n\n"
+        f"{questions}\n\n"
+        f"---\n"
+        f"Please answer the above. I'll incorporate your answers and continue.\n"
+        f"Workspace: {workspace}"
+    )
+    notify(session_key, msg, channel)
+    log("paused — waiting for clarification (up to 30 min)...")
+
+    for _ in range(60):  # 60 × 30s = 30 min
+        if response_path.exists():
+            response = response_path.read_text().strip()
+            log(f"clarification received ({len(response)} chars) — resuming")
+            clarification_path.unlink(missing_ok=True)
+            # Append clarification to task.md so future intake sessions see it
+            with open(workspace / "task.md", "a") as f:
+                f.write(f"\n\n## User Clarification\n\n{response}\n")
+            return response
+        time.sleep(30)
+
+    log("clarification timeout — proceeding with existing task description")
+    return ""
 
 
 # ── Stages ────────────────────────────────────────────────────────────────────
@@ -117,7 +152,8 @@ def extract_criteria_feedback(verdict: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def run_intake(workspace: Path, task: str, max_intake_iter: int = 5) -> str:
+def run_intake(workspace: Path, task: str, max_intake_iter: int = 5,
+               session_key: str = "", channel: str = "telegram") -> str:
     criteria_path = workspace / "criteria.md"
     if criteria_path.exists():
         log("intake: criteria.md already exists, skipping")
@@ -127,12 +163,24 @@ def run_intake(workspace: Path, task: str, max_intake_iter: int = 5) -> str:
     criteria = ""
 
     for i in range(1, max_intake_iter + 1):
+        # Re-read task each iteration (may have been updated with clarification)
+        task = read_file(workspace / "task.md") or task
+
         log(f"intake: iteration {i}/{max_intake_iter} — drafting criteria...")
         criteria = run_intake_draft(task, feedback, i)
 
         intake_dir = workspace / f"intake-{i:02d}"
         intake_dir.mkdir(parents=True, exist_ok=True)
         write_file(intake_dir / "criteria-draft.md", criteria)
+
+        # Check if intake is asking for user clarification
+        if "[NEEDS_CLARIFICATION]" in criteria:
+            log(f"intake: needs user clarification (iter {i})")
+            questions = criteria.split("[NEEDS_CLARIFICATION]", 1)[1].strip()
+            clarification = request_clarification(workspace, session_key, questions, channel)
+            if clarification:
+                feedback = f"User clarification provided:\n{clarification}"
+            continue
 
         log(f"intake: judging criteria quality (iter {i})...")
         verdict, approved = run_criteria_judge(task, criteria, i)
@@ -253,7 +301,8 @@ def main():
     log(f"starting — iterations {start_iter}–{max_iter}, workspace={workspace}")
 
     # ── Intake ────────────────────────────────────────────────────────────────
-    criteria = run_intake(workspace, task, max_intake_iter=args.max_intake_iter)
+    criteria = run_intake(workspace, task, max_intake_iter=args.max_intake_iter,
+                          session_key=session_key, channel=args.channel)
 
     # ── Loop ──────────────────────────────────────────────────────────────────
     feedback = read_file(workspace / "feedback.md")

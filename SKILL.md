@@ -81,6 +81,23 @@ memory/checkmate-YYYYMMDD-HHMMSS/
 └── final-output.md   # written on completion
 ```
 
+## Handling Clarification Requests
+
+If the intake can't produce testable criteria, it sends a `[checkmate: clarification needed]` message to your session.
+
+**When you receive this:**
+1. Relay the questions to the user naturally
+2. When the user answers, write their response to: `WORKSPACE/clarification-response.md`
+3. The script is polling for that file — it will resume automatically
+
+```bash
+cat > /path/to/workspace/clarification-response.md << 'EOF'
+[user's answers here]
+EOF
+```
+
+The workspace path is included in the clarification message. The script waits up to 30 minutes before timing out.
+
 ## Resume
 
 If the script is interrupted, just re-run it with the same `--workspace`. It reads `state.json` and skips completed steps.
