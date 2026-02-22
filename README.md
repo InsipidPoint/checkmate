@@ -23,6 +23,32 @@ Workers get the full OpenClaw agent runtime: `exec`, `web_search`, `web_fetch`, 
 
 ---
 
+## Requirements
+
+- **OpenClaw platform CLI** (`openclaw`) in `PATH` — used for session UUID lookup, agent-turn injection, and fallback channel delivery
+- **Python 3** — `run.py` uses stdlib only; no pip packages needed
+- No separate API keys or env vars — routes through the gateway's existing OAuth
+
+---
+
+## Security & Privilege Model
+
+> ⚠️ **High-privilege skill** — read this before using in batch or automated mode.
+
+**Workers and judges inherit full host-agent runtime:**
+- Shell access (`exec`)
+- Network access (`web_search`, `web_fetch`)
+- All installed skills, including OAuth-bound ones (Gmail, Drive, etc.)
+- Ability to spawn further sub-agents (`sessions_spawn`)
+
+The task description you provide **directly controls** what workers do — treat it like code you're about to run, not a prompt you're typing.
+
+**Batch mode (`--no-interactive`) removes all human gates.** In interactive mode (default) you approve criteria and each checkpoint. In batch mode the loop runs to completion with no human review — only use this for tasks and environments you fully trust.
+
+**Checkpoint bridging writes your replies verbatim to disk.** Don't relay untrusted third-party content as checkpoint replies.
+
+---
+
 ## Architecture
 
 ```

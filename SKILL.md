@@ -1,12 +1,41 @@
 ---
 name: checkmate
 description: "Enforces task completion: turns your goal into pass/fail criteria, runs a worker, judges the output, feeds back what's missing, and loops until every criterion passes. Nothing ships until it's truly done. Trigger: 'checkmate: TASK'"
+requires:
+  cli:
+    - openclaw  # platform CLI: sessions.list, agent spawn, message send
+privileges: high  # spawned workers inherit full host-agent runtime (exec, OAuth, all skills)
 ---
 
 # Checkmate
 
 A deterministic Python loop (`scripts/run.py`) calls an LLM for worker and judge roles.
 Nothing leaves until it passes — and you stay in control at every checkpoint.
+
+## Requirements
+
+- **OpenClaw platform CLI** (`openclaw`) — must be available in `PATH`. Used for:
+  - `openclaw gateway call sessions.list` — resolve session UUID for turn injection
+  - `openclaw agent --session-id <UUID>` — inject checkpoint messages into the live session
+  - `openclaw message send` — fallback channel delivery (e.g. Telegram, Signal)
+- **Python 3** — `run.py` is pure stdlib; no pip packages required
+- No separate API keys or env vars needed — routes through the gateway's existing OAuth
+
+## Security & Privilege Model
+
+> ⚠️ **This is a high-privilege skill.** Read before using in batch/automated mode.
+
+**Spawned workers and judges inherit full host-agent runtime**, including:
+- `exec` (arbitrary shell commands)
+- `web_search`, `web_fetch`
+- All installed skills (including those with OAuth-bound credentials — Gmail, Drive, etc.)
+- `sessions_spawn` (workers can spawn further sub-agents)
+
+This means **the task description you provide directly controls what the worker does** — treat it like code you're about to run, not a message you're about to send.
+
+**Batch mode (`--no-interactive`) removes all human gates.** In interactive mode (default), you approve criteria and each checkpoint before the loop continues. In batch mode, criteria are auto-approved and the loop runs to completion autonomously — only use this for tasks and environments you fully trust.
+
+**User-input bridging writes arbitrary content to disk.** When you reply to a checkpoint, the main agent writes your reply verbatim to `user-input.md` in the workspace. The orchestrator reads it and acts on it. Don't relay untrusted third-party content as checkpoint replies.
 
 ## When to Use
 
