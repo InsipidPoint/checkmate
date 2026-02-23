@@ -114,7 +114,7 @@ When checkmate is triggered:
 
 2. **Create workspace**:
    ```bash
-   bash <skill-path>/scripts/workspace.sh /tmp "TASK"
+   bash <skill-path>/scripts/workspace.sh /root/clawd/workspaces "TASK"
    ```
    Prints the workspace path. Write the full task to `workspace/task.md` if needed.
 
@@ -174,7 +174,7 @@ The orchestrator polls for this file every 5 seconds. Once written, it resumes a
 ## Workspace layout
 
 ```
-memory/checkmate-YYYYMMDD-HHMMSS/
+workspaces/checkmate-YYYYMMDD-HHMMSS/
 ├── task.md               # task description (user may edit pre-start)
 ├── criteria.md           # locked after intake
 ├── feedback.md           # accumulated judge gaps + user direction
