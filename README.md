@@ -113,7 +113,7 @@ Result is read from `result.payloads[0].text`. Sessions are stateless — no sha
 
 ## Installation
 
-Install via the [ClawhHub CLI](https://clawhub.ai):
+Install via the [Clawhub CLI](https://clawhub.ai):
 
 ```bash
 clawhub install checkmate
